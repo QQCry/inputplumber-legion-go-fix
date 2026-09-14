@@ -36,14 +36,16 @@ Works seamlessly in both **Desktop Mode** and **Gamescope (Steam Game Mode)** on
 
 ## 📁 Repository Contents
 
-| File | Description |
-| :--- | :--- |
-| `enable-right-gyro-hhd.sh` | Main installer script: installs the patched native-IMU binary and restarts the service |
+| `enable-right-gyro-hhd.sh` | Main installer script: installs the patched native-IMU binary, configures udev/yaml, and restarts the service |
 | `set-gyro-source.sh` | Helper script to switch active gyro source between tablet and controller on-the-fly |
+| `set-ds5-gyro-speed.sh` | Dynamic real-time speed multiplier adjuster for DualSense gyro emulation |
+| `fix-inputplumber.sh` | Comprehensive build & maintenance tool (source rebuild, pacman hook, health check) |
 | `inputplumber-legiongo.patch` | Clean, standalone Git patch against upstream InputPlumber (`ShadowBlip/InputPlumber`) |
 | `50-legion_go.yaml` | Corrected InputPlumber device configuration profile (`deck-uhid` default) |
-| `99-inputplumber-device-setup.rules` | Udev rules to ensure permissions for `hidraw` controller nodes |
+| `99-inputplumber-device-setup.rules` | Udev rules to ensure permissions for `hidraw` controller nodes and eliminate mouse lag |
 | `test-gyro.py` | Real-time terminal diagnostic tool verifying Pitch, Yaw, Roll, and 1G Accel |
+| `test-dualsense-gyro.py` | Real-time terminal diagnostic tool for DualSense IMU data |
+| `INPUTPLUMBER_GYRO_FIX.md` | In-depth technical architecture and protocol documentation |
 
 ---
 
@@ -52,3 +54,67 @@ Works seamlessly in both **Desktop Mode** and **Gamescope (Steam Game Mode)** on
 ### 1. Apply Fix / Install Patched Binary
 ```bash
 sudo bash enable-right-gyro-hhd.sh
+```
+This script installs the patched InputPlumber binary with native Right Joy-Con IMU support, configures `50-legion_go.yaml`, configures udev rules, sends MCU activation packets, and restarts `inputplumber.service`.
+
+### 2. Switch Gyro Source On-the-Fly
+Switch motion sensors anytime without restarting InputPlumber or games:
+```bash
+# Switch to right controller sensor (detached / docked play)
+~/set-gyro-source.sh controller
+
+# Switch back to internal tablet sensor (handheld mode)
+~/set-gyro-source.sh tablet
+
+# Check active sensor status
+~/set-gyro-source.sh status
+```
+
+### 3. Adjust DualSense Gyro Speed (Optional)
+If using DualSense emulation, change sensitivity live without restarting:
+```bash
+# Set factor (e.g. 1.0 for 1:1 raw, 1.5, 2.0)
+~/set-ds5-gyro-speed.sh 1.0
+```
+
+### 4. Live Sensor Testing
+Verify motion controls in real-time from the terminal:
+```bash
+# For Steam Deck (deck-uhid)
+python3 test-gyro.py
+
+# For DualSense (ds5)
+python3 test-dualsense-gyro.py
+```
+
+### 5. Build & Patch Fresh from Upstream Source
+To compile directly from source using the included patch:
+```bash
+sudo bash fix-inputplumber.sh --rebuild
+```
+
+### 6. Auto-Repair on Package Updates (Pacman Hook)
+To automatically re-apply the patched binary whenever `pacman -Syu` updates `inputplumber`:
+```bash
+sudo bash fix-inputplumber.sh --hook
+```
+
+---
+
+## 🎮 In-Game Gyro Setup (Steam Input)
+
+1. Open Steam (Desktop Mode or Gamescope Game Mode).
+2. Open your game, press **Steam button / Legion-L** $\rightarrow$ Controller Settings $\rightarrow$ **Edit Layout** $\rightarrow$ **Gyro**.
+3. Set **Gyro Behavior** to:
+   * **As Mouse** *(Recommended for FPS and precise aiming)*
+   * **As Right Joystick** *(For games without simultaneous mouse + gamepad support)*
+4. Set **Gyro Enable Button**:
+   * E.g. **Always On** or **Left Trigger Full Pull** (ADS / Aim Down Sights).
+   * *Note:* Capacitive stick touch is not supported by Legion Go hardware.
+5. In **Steam Settings $\rightarrow$ Controller $\rightarrow$ Calibration $\rightarrow$ Gyroscope**, verify that the horizon is level and responsive.
+
+---
+
+## 📜 License
+MIT License
+

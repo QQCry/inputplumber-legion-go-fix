@@ -103,106 +103,659 @@ index 9e23672..7af1049 100644
          self.rotate_value(&mut gyro_input);
  
          Ok(Some(Event::Gyro(gyro_input)))
-diff --git a/src/drivers/lego/go2_driver.rs b/src/drivers/lego/go2_driver.rs
-index 7fa1b91..091288e 100644
---- a/src/drivers/lego/go2_driver.rs
-+++ b/src/drivers/lego/go2_driver.rs
-@@ -4,6 +4,7 @@ use std::{error::Error, ffi::CString};
+diff --git a/src/drivers/lego/go1_driver.rs b/src/drivers/lego/go1_driver.rs
+index bb7ea0d..0856dd7 100644
+--- a/src/drivers/lego/go1_driver.rs
++++ b/src/drivers/lego/go1_driver.rs
+@@ -1,19 +1,21 @@
+ use std::collections::HashSet;
++use std::time::{Duration, Instant};
+ use std::{error::Error, ffi::CString};
+ 
  use hidapi::HidDevice;
  use packed_struct::PackedStruct;
  
-+use crate::dmi::get_dmi_data;
- use crate::drivers::lego::HID_LENOVO_GO_FILTER;
- use crate::input::capability::{Capability, Source};
+-use crate::input::capability::Capability;
++use crate::input::capability::{Capability, Source};
  use crate::udev::device::UdevDevice;
-@@ -27,9 +28,37 @@ pub struct Driver {
+ 
+ use super::{
+     event::{
+-        AxisEvent, BinaryInput, Event, GamepadButtonEvent, JoyAxisInput, MouseWheelInput,
+-        TriggerEvent, TriggerInput,
++        AxisEvent, BinaryInput, Event, GamepadButtonEvent, ImuAxisInput, JoyAxisInput,
++        MouseWheelInput, TriggerEvent, TriggerInput,
+     },
+     hid_report::{GamepadMode, XInputDataReport},
+-    GAMEPAD_TIMEOUT, GO1_PIDS, GP_IID, VID, XINPUT_COMMAND_ID, XINPUT_DATA, XINPUT_PACKET_SIZE,
++    GAMEPAD_TIMEOUT, GO1_PIDS, GP_IID, VID, XINPUT_COMMAND_ID, XINPUT_DATA,
++    XINPUT_PACKET_SIZE,
+ };
+ 
+ pub struct Driver {
+@@ -23,9 +25,71 @@ pub struct Driver {
      filtered_events: HashSet<Capability>,
      /// State for the internal gamepad controller
      state: Option<XInputDataReport>,
-+    /// Last emitted accelerometer reading (for noise threshold gating)
-+    last_emitted_accel: Option<(i16, i16, i16)>,
++    /// Last emitted accelerometer reading (for noise threshold gating and periodic refresh)
++    last_emitted_accel: Option<(i16, i16, i16, u8)>,
 +    /// Last emitted gyroscope reading (for resting deadzone gating)
 +    last_emitted_gyro: (i16, i16, i16),
++    /// Timestamp of last sent heartbeat / keep-alive
++    last_heartbeat: Instant,
++    /// Timestamp of last received active motion packet
++    last_motion_packet: Instant,
  }
  
  impl Driver {
-+    pub fn send_hhd_cmd(dev: &HidDevice, subcmd: u8, target: u8, val: u8) {
-+        let short_buf = [0x05, 0x06, 0x6A, subcmd, target, val, 0x01];
-+        let res_short = dev.write(&short_buf);
-+        let mut full_buf = [0u8; 64];
-+        full_buf[..7].copy_from_slice(&short_buf);
-+        let res_full = dev.write(&full_buf);
-+        log::info!("Legion Go: send_hhd_cmd(subcmd={:#x}, target={:#x}, val={:#x}) -> short={:?}, full={:?}",
-+            subcmd, target, val, res_short, res_full);
-+        std::thread::sleep(std::time::Duration::from_millis(30));
++    /// Send an output report to the Legion Go controller interface.
++    /// Commands 0x6a and 0x69 (HHD protocol) MUST be sent as exact unpadded bytes (7 bytes).
++    /// Initial Lenovo feature commands (0x05 0x00 0x04 ...) are padded to 64 bytes.
++    pub fn send_hid_cmd(dev: &HidDevice, cmd: &[u8]) {
++        let is_hhd_cmd = cmd.len() >= 3 && (cmd[2] == 0x6A || cmd[2] == 0x69);
++        if is_hhd_cmd {
++            match dev.write(cmd) {
++                Ok(n) => log::info!("Legion Go: sent unpadded HID cmd {:02x?} ({} bytes)", cmd, n),
++                Err(e) => log::warn!("Legion Go: error sending unpadded HID cmd {:02x?}: {}", cmd, e),
++            }
++        } else {
++            let mut buf = [0u8; 64];
++            let len = cmd.len().min(64);
++            buf[..len].copy_from_slice(&cmd[..len]);
++            match dev.write(&buf) {
++                Ok(n) => log::info!("Legion Go: sent Lenovo padded HID cmd {:02x?} ({} bytes)", &cmd[..len], n),
++                Err(e) => log::warn!("Legion Go: error sending Lenovo padded HID cmd {:02x?}: {}", &cmd[..len], e),
++            }
++        }
++        std::thread::sleep(std::time::Duration::from_millis(20));
 +    }
 +
-+    pub fn send_lenovo_cmd(dev: &HidDevice, subcmd: u8, prop: u8, target: u8, val: u8) {
-+        let mut buf = [0u8; 64];
-+        buf[0] = 0x05;
-+        buf[1] = 0x00;
-+        buf[2] = subcmd;
-+        buf[3] = prop;
-+        buf[4] = target;
-+        buf[5] = val;
-+        let res = dev.write(&buf);
-+        log::info!("Legion Go: send_lenovo_cmd({:#x}, {:#x}, {:#x}, {:#x}) -> {:?}", subcmd, prop, target, val, res);
-+        std::thread::sleep(std::time::Duration::from_millis(30));
++    /// Send non-blocking command: 0x6a commands as exact unpadded 7 bytes, Lenovo reports as 64 bytes padded
++    fn send_heartbeat_cmd(dev: &HidDevice, cmd: &[u8]) {
++        let is_hhd_cmd = cmd.len() >= 3 && (cmd[2] == 0x6A || cmd[2] == 0x69);
++        if is_hhd_cmd {
++            let _ = dev.write(cmd);
++        } else {
++            let mut buf = [0u8; 64];
++            let len = cmd.len().min(64);
++            buf[..len].copy_from_slice(&cmd[..len]);
++            let _ = dev.write(&buf);
++        }
++    }
++
++    /// Send keep-alive / wake-up packets to re-arm IMU sensors without blocking
++    pub fn send_heartbeat(&self) {
++        // 1. Disable IMU bypass (in case controller reset)
++        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x00, 0x04, 0x03, 0x04, 0x00]);
++        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x00, 0x04, 0x03, 0x03, 0x00]);
++
++        // 2. Enable IMU sensors using Lenovo FEATURE_IMU_ENABLE
++        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x00, 0x04, 0x05, 0x04, 0x01]);
++        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x00, 0x04, 0x05, 0x03, 0x01]);
++
++        // 3. Right Controller: Enable IMU & 16-bit HQ report stream (HHD protocol: EXACT 7 BYTES)
++        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x06, 0x6A, 0x02, 0x04, 0x01, 0x01]);
++        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x06, 0x6A, 0x07, 0x04, 0x02, 0x01]);
++
++        // 4. Left Controller: Enable IMU & 16-bit HQ report stream (HHD protocol: EXACT 7 BYTES)
++        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x06, 0x6A, 0x02, 0x03, 0x01, 0x01]);
++        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x06, 0x6A, 0x07, 0x03, 0x02, 0x01]);
 +    }
 +
      pub fn new(udev_device: UdevDevice) -> Result<Self, Box<dyn Error + Send + Sync>> {
          let fmtpath = udev_device.devnode().clone();
          let path = CString::new(fmtpath.clone())?;
-@@ -44,11 +73,48 @@ impl Driver {
-             return Err(format!("Device '{fmtpath}' is not a Legion Go S Controller").into());
-         }
- 
+@@ -37,34 +101,120 @@ impl Driver {
+             || !GO1_PIDS.contains(&info.product_id())
+             || info.interface_number() != GP_IID
+         {
+-            return Err(format!("Device '{fmtpath}' is not a Legion Go S Controller").into());
++            return Err(format!("Device '{fmtpath}' is not a Legion Go Controller").into());
++        }
++
++        log::info!(
++            "Legion Go: successfully opened controller device on '{}' (PID: {:04x}, interface: {})",
++            fmtpath,
++            info.product_id(),
++            info.interface_number()
++        );
++
 +        // Ensure os_mode is windows, imu_bypass is disabled, and imu is enabled in sysfs
 +        if let Ok(dev) = udev_device.get_device() {
-+            if let Some(parent) = dev.parent() {
++            let mut curr = dev.parent();
++            while let Some(parent) = curr {
 +                let os_mode = parent.syspath().join("os_mode");
 +                if os_mode.exists() {
 +                    let _ = std::fs::write(&os_mode, "windows\n");
++                    let _ = std::fs::write(parent.syspath().join("right_handle/imu_bypass_enabled"), "false\n");
++                    let _ = std::fs::write(parent.syspath().join("left_handle/imu_bypass_enabled"), "false\n");
++                    let _ = std::fs::write(parent.syspath().join("left_handle/imu_enabled"), "true\n");
++                    break;
 +                }
-+                let imu_bypass = parent.syspath().join("right_handle/imu_bypass_enabled");
-+                if imu_bypass.exists() {
-+                    let _ = std::fs::write(&imu_bypass, "false\n");
-+                }
-+                let left_imu_bypass = parent.syspath().join("left_handle/imu_bypass_enabled");
-+                if left_imu_bypass.exists() {
-+                    let _ = std::fs::write(&left_imu_bypass, "false\n");
-+                }
-+                let imu_en = parent.syspath().join("right_handle/imu_enabled");
-+                if imu_en.exists() {
-+                    let _ = std::fs::write(&imu_en, "true\n");
-+                }
-+                let left_imu_en = parent.syspath().join("left_handle/imu_enabled");
-+                if left_imu_en.exists() {
-+                    let _ = std::fs::write(&left_imu_en, "true\n");
-+                }
++                curr = parent.parent();
 +            }
-+        }
+         }
+ 
++        // 1. Disable IMU bypass for Right and Left handles (preserves MCU touchpad filtering, prevents mouse lag)
++        Self::send_hid_cmd(&hid_device, &[0x05, 0x00, 0x04, 0x03, 0x04, 0x00]);
++        Self::send_hid_cmd(&hid_device, &[0x05, 0x00, 0x04, 0x03, 0x03, 0x00]);
 +
-+        // Send MCU activation commands (both Lenovo driver format & HHD formats)
-+        Self::send_lenovo_cmd(&hid_device, 0x04, 0x03, 0x04, 0x01); // Right IMU Enable
-+        Self::send_lenovo_cmd(&hid_device, 0x04, 0x05, 0x03, 0x01); // Left IMU Enable
-+        Self::send_hhd_cmd(&hid_device, 0x02, 0x04, 0x01); // Right IMU Enable
-+        Self::send_hhd_cmd(&hid_device, 0x07, 0x04, 0x02); // Right 16-bit HQ Report
-+        Self::send_hhd_cmd(&hid_device, 0x02, 0x03, 0x01); // Left IMU Enable
-+        Self::send_hhd_cmd(&hid_device, 0x07, 0x03, 0x02); // Left 16-bit HQ Report
++        // 2. Enable IMU sensors using Lenovo FEATURE_IMU_ENABLE (0x05 -> 0x01)
++        Self::send_hid_cmd(&hid_device, &[0x05, 0x00, 0x04, 0x05, 0x04, 0x01]);
++        Self::send_hid_cmd(&hid_device, &[0x05, 0x00, 0x04, 0x05, 0x03, 0x01]);
++
++        // 3. Right Controller: Enable IMU & 16-bit HQ report stream (HHD protocol)
++        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x6A, 0x02, 0x04, 0x01, 0x01]);
++        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x6A, 0x07, 0x04, 0x02, 0x01]);
++
++        // 4. Left Controller: Enable IMU & 16-bit HQ report stream (HHD protocol)
++        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x6A, 0x02, 0x03, 0x01, 0x01]);
++        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x6A, 0x07, 0x03, 0x02, 0x01]);
++
++        // 5. Disable Legion button swap (keep standard layout)
++        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x69, 0x04, 0x01, 0x01, 0x01]);
++
 +        log::info!("Legion Go: sent Lenovo and HHD IMU activation packets (Left & Right)");
 +
++        let now = Instant::now();
          Ok(Self {
-             udev_device,
              hid_device,
              filtered_events: Default::default(),
              state: None,
 +            last_emitted_accel: None,
 +            last_emitted_gyro: (0, 0, 0),
++            last_heartbeat: now,
++            last_motion_packet: now,
          })
      }
  
-@@ -63,30 +129,17 @@ impl Driver {
+-    //TODO: Using InputPlumber Capability enum prevents this driver from having the ability to be
+-    //a standalone crate. When this driver is eventually separated, refactor the Event type to
+-    //follow the pattern DeviceEvent(Event, Value) and create a match table for
+-    //Capability->Event/Event->Capability in the SourceDriver implementation.
+     pub fn update_filtered_events(&mut self, events: HashSet<Capability>) {
+         self.filtered_events = events;
+     }
+ 
++    pub fn get_default_event_filter(
++        &self,
++    ) -> Result<HashSet<Capability>, Box<dyn Error + Send + Sync>> {
++        // Explicitly enable Right Joy-Con IMU (filter out Left and Center)
++        Ok(HashSet::from([
++            Capability::Accelerometer(Source::Left),
++            Capability::Accelerometer(Source::Center),
++            Capability::Gyroscope(Source::Left),
++            Capability::Gyroscope(Source::Center),
++        ]))
++    }
++
+     /// Poll the device and read input reports
+     pub fn poll(&mut self) -> Result<Vec<Event>, Box<dyn Error + Send + Sync>> {
+-        // Read data from the device into a buffer
+-        let mut buf = [0; XINPUT_PACKET_SIZE];
+-        let bytes_read = self
+-            .hid_device
+-            .read_timeout(&mut buf[..], GAMEPAD_TIMEOUT)?;
+-
+-        if bytes_read > XINPUT_PACKET_SIZE {
+-            return Err("Invalid packet size for X-Input Data.".into());
++        let now = Instant::now();
++        let time_since_heartbeat = now.duration_since(self.last_heartbeat);
++        let time_since_motion = now.duration_since(self.last_motion_packet);
++
++        // Heartbeat / Keep-Alive logic:
++        // 1. Regular timer: send keep-alive every 3 seconds
++        // 2. Silence re-arm: if no motion packet received for >= 1500ms
++        if time_since_heartbeat >= Duration::from_secs(3) {
++            log::debug!("Legion Go: sending periodic IMU heartbeat");
++            self.send_heartbeat();
++            self.last_heartbeat = now;
++        } else if time_since_motion >= Duration::from_millis(1500) {
++            log::info!(
++                "Legion Go: IMU stream silence detected ({}ms), re-arming sensors",
++                time_since_motion.as_millis()
++            );
++            self.send_heartbeat();
++            self.last_heartbeat = now;
++            // Prevent spamming re-arm on every 8ms cycle while hardware wakes up
++            self.last_motion_packet = now;
++        }
++
++        let mut buf = [0u8; 64];
++        let bytes_read = match self.hid_device.read_timeout(&mut buf[..], GAMEPAD_TIMEOUT) {
++            Ok(n) => n,
++            Err(e) => {
++                let err_str = e.to_string();
++                if err_str.contains("device disconnected") || err_str.contains("No such device") {
++                    return Err(e.into());
++                }
++                log::debug!("Legion Go: transient read_timeout error: {e}");
++                0
++            }
++        };
++
++        if bytes_read == 0 || bytes_read < XINPUT_PACKET_SIZE {
++            return Ok(vec![]);
+         }
+ 
+         let report_id = buf[0];
+@@ -73,29 +223,27 @@ impl Driver {
+         // Configuration event responses happen on the same endpoint. If this data packet isn't
+         // specifically xinput data it can crash the driver, so block it.
+         if command_id != XINPUT_COMMAND_ID {
+-            //log::trace!("Got event that isn't xinput data, skipping");
+             return Ok(vec![]);
+         }
+-        let slice = &buf[..bytes_read];
+-        //log::trace!("Got Report ID: {report_id}");
+-        //log::trace!("Got Report Size: {bytes_read}");
+-        //log::trace!("Raw Data: {:02x?}", buf);
+ 
+         let events = match report_id {
+             XINPUT_DATA => {
+-                if bytes_read != XINPUT_PACKET_SIZE {
+-                    return Err("Invalid packet size for X-Input Data.".into());
++                log::info!("Received IMU report: len={}", buf.len());
++                match buf[..XINPUT_PACKET_SIZE].try_into() {
++                    Ok(sized_buf) => match self.handle_xinput_report(sized_buf) {
++                        Ok(ev) => ev,
++                        Err(e) => {
++                            log::warn!("Legion Go: failed to handle xinput report: {e}");
++                            vec![]
++                        }
++                    },
++                    Err(e) => {
++                        log::warn!("Legion Go: buffer slice error: {e}");
++                        vec![]
++                    }
+                 }
+-                // Handle the incoming input report
+-                let sized_buf = slice.try_into()?;
+-
+-                self.handle_xinput_report(sized_buf)?
+-            }
+-            _ => {
+-                //log::trace!("Invalid Report ID.");
+-                let events = vec![];
+-                events
+             }
++            _ => vec![],
+         };
+ 
+         Ok(events)
+@@ -109,10 +257,22 @@ impl Driver {
+     ) -> Result<Vec<Event>, Box<dyn Error + Send + Sync>> {
+         let input_report = XInputDataReport::unpack(&buf)?;
+ 
+-        // Print input report for debugging
+-        //log::debug!("--- Input report ---");
+-        //log::debug!("{input_report}");
+-        //log::debug!(" ---- End Report ----");
++        // If either controller reports active IMU readings, update last_motion_packet timestamp
++        if input_report.right_accel_x != 0
++            || input_report.right_accel_y != 0
++            || input_report.right_accel_z != 0
++            || input_report.right_gyro_x != 0
++            || input_report.right_gyro_y != 0
++            || input_report.right_gyro_z != 0
++            || input_report.left_accel_x != 0
++            || input_report.left_accel_y != 0
++            || input_report.left_accel_z != 0
++            || input_report.left_gyro_x != 0
++            || input_report.left_gyro_y != 0
++            || input_report.left_gyro_z != 0
++        {
++            self.last_motion_packet = Instant::now();
++        }
+ 
+         // Update the state
+         let old_state = self.update_xinput_state(input_report);
+@@ -265,6 +425,11 @@ impl Driver {
+                     },
+                 )));
+             }
++            if state.m1 != old_state.m1 {
++                events.push(Event::GamepadButton(GamepadButtonEvent::M1(BinaryInput {
++                    pressed: state.m1,
++                })));
++            }
+             if state.m2 != old_state.m2 {
+                 events.push(Event::GamepadButton(GamepadButtonEvent::M2(BinaryInput {
+                     pressed: state.m2,
+@@ -297,6 +462,20 @@ impl Driver {
+                     },
+                 )));
+             }
++            if state.show_desktop != old_state.show_desktop {
++                events.push(Event::GamepadButton(GamepadButtonEvent::ShowDesktop(
++                    BinaryInput {
++                        pressed: state.show_desktop,
++                    },
++                )));
++            }
++            if state.alt_tab != old_state.alt_tab {
++                events.push(Event::GamepadButton(GamepadButtonEvent::AltTab(
++                    BinaryInput {
++                        pressed: state.alt_tab,
++                    },
++                )));
++            }
+             if state.thumb_l != old_state.thumb_l {
+                 events.push(Event::GamepadButton(GamepadButtonEvent::ThumbL(
+                     BinaryInput {
+@@ -361,6 +540,137 @@ impl Driver {
+                 log::trace!("Left controller connected state: {:?}", state.l_con_state);
+                 log::trace!("Right controller connected state: {:?}", state.r_con_state);
+             }
++            if !self
++                .filtered_events
++                .contains(&Capability::Accelerometer(Source::Left))
++                && (state.left_accel_x != old_state.left_accel_x
++                    || state.left_accel_y != old_state.left_accel_y
++                    || state.left_accel_z != old_state.left_accel_z)
++            {
++                events.push(Event::Axis(AxisEvent::LeftAccel(ImuAxisInput {
++                    pitch: -state.left_accel_x,
++                    roll: state.left_accel_y,
++                    yaw: state.left_accel_z,
++                })))
++            }
++            // HHD hardware glitch filter: controller firmware has a bug where it randomly emits
++            // 254 or 255 (or -254 / -255) on gyro axes as corrupt glitch packets.
++            let is_gyro_glitch = |v: i16| -> bool {
++                let a = v.abs();
++                a == 254 || a == 255
++            };
++
++            // Accel: emit on initial packet, when change exceeds noise threshold (25 LSB ~ 0.05G),
++            // or periodically (every ~15 reports / 120ms) so that gravity is never lost after target clear_state.
++            const ACCEL_NOISE_THRESHOLD: i16 = 25;
++            let has_accel_data = state.right_accel_x != 0 || state.right_accel_y != 0 || state.right_accel_z != 0;
++            if has_accel_data {
++                let emit_accel = match self.last_emitted_accel {
++                    None => true,
++                    Some((lx, ly, lz, count)) => {
++                        count >= 15
++                            || (state.right_accel_x - lx).abs() > ACCEL_NOISE_THRESHOLD
++                            || (state.right_accel_y - ly).abs() > ACCEL_NOISE_THRESHOLD
++                            || (state.right_accel_z - lz).abs() > ACCEL_NOISE_THRESHOLD
++                    }
++                };
++                if !self.filtered_events.contains(&Capability::Accelerometer(Source::Right)) && emit_accel {
++                    let prev_count = self.last_emitted_accel.map(|(_, _, _, c)| c).unwrap_or(0);
++                    let next_count = if prev_count >= 15 { 0 } else { prev_count + 1 };
++                    self.last_emitted_accel = Some((state.right_accel_x, state.right_accel_y, state.right_accel_z, next_count));
++                    events.push(Event::Axis(AxisEvent::RightAccel(ImuAxisInput {
++                        pitch: -state.right_accel_x,
++                        roll: state.right_accel_y,
++                        yaw: state.right_accel_z,
++                    })));
++                } else if let Some((lx, ly, lz, count)) = self.last_emitted_accel {
++                    self.last_emitted_accel = Some((lx, ly, lz, count + 1));
++                }
++            } else if let Some((lx, ly, lz, count)) = self.last_emitted_accel {
++                // Sensor temporarily silent: keep Steam Deck UHID gravity vector alive with last known valid reading
++                let next_count = if count >= 15 { 0 } else { count + 1 };
++                self.last_emitted_accel = Some((lx, ly, lz, next_count));
++                if !self.filtered_events.contains(&Capability::Accelerometer(Source::Right)) && count >= 15 {
++                    events.push(Event::Axis(AxisEvent::RightAccel(ImuAxisInput {
++                        pitch: -lx,
++                        roll: ly,
++                        yaw: lz,
++                    })));
++                }
++            }
++            if !self
++                .filtered_events
++                .contains(&Capability::Accelerometer(Source::Center))
++                && (state.left_accel_x != old_state.left_accel_x
++                    || state.left_accel_y != old_state.left_accel_y
++                    || state.left_accel_z != old_state.left_accel_z
++                    || state.right_accel_x != old_state.right_accel_x
++                    || state.right_accel_y != old_state.right_accel_y
++                    || state.right_accel_z != old_state.right_accel_z)
++            {
++                events.push(Event::Axis(AxisEvent::MultiAccel(ImuAxisInput {
++                    pitch: -(state.left_accel_x + state.right_accel_x) / 2,
++                    roll: (state.left_accel_y + state.right_accel_y) / 2,
++                    yaw: (state.left_accel_z + state.right_accel_z) / 2,
++                })))
++            }
++            if !self
++                .filtered_events
++                .contains(&Capability::Gyroscope(Source::Left))
++                && !is_gyro_glitch(state.left_gyro_x)
++                && !is_gyro_glitch(state.left_gyro_y)
++                && !is_gyro_glitch(state.left_gyro_z)
++                && (state.left_gyro_x != old_state.left_gyro_x
++                    || state.left_gyro_y != old_state.left_gyro_y
++                    || state.left_gyro_z != old_state.left_gyro_z)
++            {
++                events.push(Event::Axis(AxisEvent::LeftGyro(ImuAxisInput {
++                    pitch: -state.left_gyro_x,
++                    roll: -state.left_gyro_y,
++                    yaw: -state.left_gyro_z,
++                })))
++            }
++            if !self.filtered_events.contains(&Capability::Gyroscope(Source::Right))
++                && !is_gyro_glitch(state.right_gyro_x)
++                && !is_gyro_glitch(state.right_gyro_y)
++                && !is_gyro_glitch(state.right_gyro_z)
++            {
++                // Gyro: filter MEMS sensor noise (< 16 LSB ~ 1 deg/s).
++                // Emit when motion is detected, and emit (0, 0, 0) once when transitioning to rest.
++                const GYRO_NOISE_DEADZONE: i16 = 16;
++                let gx = if state.right_gyro_x.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_x };
++                let gy = if state.right_gyro_y.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_y };
++                let gz = if state.right_gyro_z.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_z };
++
++                let is_moving = gx != 0 || gy != 0 || gz != 0;
++                let was_moving = self.last_emitted_gyro.0 != 0 || self.last_emitted_gyro.1 != 0 || self.last_emitted_gyro.2 != 0;
++
++                if is_moving || was_moving {
++                    self.last_emitted_gyro = (gx, gy, gz);
++                    events.push(Event::Axis(AxisEvent::RightGyro(ImuAxisInput {
++                        pitch: -gx,
++                        roll: -gy,
++                        yaw: gz,
++                    })));
++                }
++            }
++
++            if !self
++                .filtered_events
++                .contains(&Capability::Gyroscope(Source::Center))
++                && (state.left_gyro_x != old_state.left_gyro_x
++                    || state.left_gyro_y != old_state.left_gyro_y
++                    || state.left_gyro_z != old_state.left_gyro_z
++                    || state.right_gyro_x != old_state.right_gyro_x
++                    || state.right_gyro_y != old_state.right_gyro_y
++                    || state.right_gyro_z != old_state.right_gyro_z)
++            {
++                events.push(Event::Axis(AxisEvent::MultiGyro(ImuAxisInput {
++                    pitch: -(state.left_gyro_x + state.right_gyro_x) / 2,
++                    roll: (state.left_gyro_y + state.right_gyro_y) / 2,
++                    yaw: (state.left_gyro_z + state.right_gyro_z) / 2,
++                })))
++            }
+         }
+         events
+     }
+diff --git a/src/drivers/lego/go2_driver.rs b/src/drivers/lego/go2_driver.rs
+index 7fa1b91..2d0ff92 100644
+--- a/src/drivers/lego/go2_driver.rs
++++ b/src/drivers/lego/go2_driver.rs
+@@ -1,10 +1,10 @@
+ use std::collections::HashSet;
++use std::time::{Duration, Instant};
+ use std::{error::Error, ffi::CString};
+ 
+ use hidapi::HidDevice;
+ use packed_struct::PackedStruct;
+ 
+-use crate::drivers::lego::HID_LENOVO_GO_FILTER;
+ use crate::input::capability::{Capability, Source};
+ use crate::udev::device::UdevDevice;
+ 
+@@ -14,22 +14,82 @@ use super::{
+         MouseWheelInput, TriggerEvent, TriggerInput,
+     },
+     hid_report::{GamepadMode, XInputDataReport},
+-    DEFAULT_EVENT_FILTER, GAMEPAD_TIMEOUT, GO2_PIDS, GP_IID, VID, XINPUT_COMMAND_ID, XINPUT_DATA,
++    GAMEPAD_TIMEOUT, GO2_PIDS, GP_IID, VID, XINPUT_COMMAND_ID, XINPUT_DATA,
+     XINPUT_PACKET_SIZE,
+ };
+ 
+ pub struct Driver {
+     /// HIDRAW device instance
+     hid_device: HidDevice,
+-    /// Udev device instance
+-    udev_device: UdevDevice,
+     /// List of events that should not be generated
+     filtered_events: HashSet<Capability>,
+     /// State for the internal gamepad controller
+     state: Option<XInputDataReport>,
++    /// Last emitted accelerometer reading (for noise threshold gating and periodic refresh)
++    last_emitted_accel: Option<(i16, i16, i16, u8)>,
++    /// Last emitted gyroscope reading (for resting deadzone gating)
++    last_emitted_gyro: (i16, i16, i16),
++    /// Timestamp of last sent heartbeat / keep-alive
++    last_heartbeat: Instant,
++    /// Timestamp of last received active motion packet
++    last_motion_packet: Instant,
+ }
+ 
+ impl Driver {
++    /// Send an output report to the Legion Go controller interface.
++    /// Commands 0x6a and 0x69 (HHD protocol) MUST be sent as exact unpadded bytes (7 bytes).
++    /// Initial Lenovo feature commands (0x05 0x00 0x04 ...) are padded to 64 bytes.
++    pub fn send_hid_cmd(dev: &HidDevice, cmd: &[u8]) {
++        let is_hhd_cmd = cmd.len() >= 3 && (cmd[2] == 0x6A || cmd[2] == 0x69);
++        if is_hhd_cmd {
++            match dev.write(cmd) {
++                Ok(n) => log::info!("Legion Go: sent unpadded HID cmd {:02x?} ({} bytes)", cmd, n),
++                Err(e) => log::warn!("Legion Go: error sending unpadded HID cmd {:02x?}: {}", cmd, e),
++            }
++        } else {
++            let mut buf = [0u8; 64];
++            let len = cmd.len().min(64);
++            buf[..len].copy_from_slice(&cmd[..len]);
++            match dev.write(&buf) {
++                Ok(n) => log::info!("Legion Go: sent Lenovo padded HID cmd {:02x?} ({} bytes)", &cmd[..len], n),
++                Err(e) => log::warn!("Legion Go: error sending Lenovo padded HID cmd {:02x?}: {}", &cmd[..len], e),
++            }
++        }
++        std::thread::sleep(std::time::Duration::from_millis(20));
++    }
++
++    /// Send non-blocking command: 0x6a commands as exact unpadded 7 bytes, Lenovo reports as 64 bytes padded
++    fn send_heartbeat_cmd(dev: &HidDevice, cmd: &[u8]) {
++        let is_hhd_cmd = cmd.len() >= 3 && (cmd[2] == 0x6A || cmd[2] == 0x69);
++        if is_hhd_cmd {
++            let _ = dev.write(cmd);
++        } else {
++            let mut buf = [0u8; 64];
++            let len = cmd.len().min(64);
++            buf[..len].copy_from_slice(&cmd[..len]);
++            let _ = dev.write(&buf);
++        }
++    }
++
++    /// Send keep-alive / wake-up packets to re-arm IMU sensors without blocking
++    pub fn send_heartbeat(&self) {
++        // 1. Disable IMU bypass (in case controller reset)
++        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x00, 0x04, 0x03, 0x04, 0x00]);
++        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x00, 0x04, 0x03, 0x03, 0x00]);
++
++        // 2. Enable IMU sensors using Lenovo FEATURE_IMU_ENABLE
++        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x00, 0x04, 0x05, 0x04, 0x01]);
++        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x00, 0x04, 0x05, 0x03, 0x01]);
++
++        // 3. Right Controller: Enable IMU & 16-bit HQ report stream (HHD protocol: EXACT 7 BYTES)
++        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x06, 0x6A, 0x02, 0x04, 0x01, 0x01]);
++        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x06, 0x6A, 0x07, 0x04, 0x02, 0x01]);
++
++        // 4. Left Controller: Enable IMU & 16-bit HQ report stream (HHD protocol: EXACT 7 BYTES)
++        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x06, 0x6A, 0x02, 0x03, 0x01, 0x01]);
++        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x06, 0x6A, 0x07, 0x03, 0x02, 0x01]);
++    }
++
+     pub fn new(udev_device: UdevDevice) -> Result<Self, Box<dyn Error + Send + Sync>> {
+         let fmtpath = udev_device.devnode().clone();
+         let path = CString::new(fmtpath.clone())?;
+@@ -41,21 +101,65 @@ impl Driver {
+             || !GO2_PIDS.contains(&info.product_id())
+             || info.interface_number() != GP_IID
+         {
+-            return Err(format!("Device '{fmtpath}' is not a Legion Go S Controller").into());
++            return Err(format!("Device '{fmtpath}' is not a Legion Go Controller").into());
+         }
+ 
++        log::info!(
++            "Legion Go: successfully opened controller device on '{}' (PID: {:04x}, interface: {})",
++            fmtpath,
++            info.product_id(),
++            info.interface_number()
++        );
++
++        // Ensure os_mode is windows, imu_bypass is disabled, and imu is enabled in sysfs
++        if let Ok(dev) = udev_device.get_device() {
++            let mut curr = dev.parent();
++            while let Some(parent) = curr {
++                let os_mode = parent.syspath().join("os_mode");
++                if os_mode.exists() {
++                    let _ = std::fs::write(&os_mode, "windows\n");
++                    let _ = std::fs::write(parent.syspath().join("right_handle/imu_bypass_enabled"), "false\n");
++                    let _ = std::fs::write(parent.syspath().join("left_handle/imu_bypass_enabled"), "false\n");
++                    let _ = std::fs::write(parent.syspath().join("left_handle/imu_enabled"), "true\n");
++                    break;
++                }
++                curr = parent.parent();
++            }
++        }
++
++        // 1. Disable IMU bypass for Right and Left handles (preserves MCU touchpad filtering, prevents mouse lag)
++        Self::send_hid_cmd(&hid_device, &[0x05, 0x00, 0x04, 0x03, 0x04, 0x00]);
++        Self::send_hid_cmd(&hid_device, &[0x05, 0x00, 0x04, 0x03, 0x03, 0x00]);
++
++        // 2. Enable IMU sensors using Lenovo FEATURE_IMU_ENABLE (0x05 -> 0x01)
++        Self::send_hid_cmd(&hid_device, &[0x05, 0x00, 0x04, 0x05, 0x04, 0x01]);
++        Self::send_hid_cmd(&hid_device, &[0x05, 0x00, 0x04, 0x05, 0x03, 0x01]);
++
++        // 3. Right Controller: Enable IMU & 16-bit HQ report stream (HHD protocol)
++        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x6A, 0x02, 0x04, 0x01, 0x01]);
++        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x6A, 0x07, 0x04, 0x02, 0x01]);
++
++        // 4. Left Controller: Enable IMU & 16-bit HQ report stream (HHD protocol)
++        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x6A, 0x02, 0x03, 0x01, 0x01]);
++        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x6A, 0x07, 0x03, 0x02, 0x01]);
++
++        // 5. Disable Legion button swap (keep standard layout)
++        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x69, 0x04, 0x01, 0x01, 0x01]);
++
++        log::info!("Legion Go: sent Lenovo and HHD IMU activation packets (Left & Right)");
++
++        let now = Instant::now();
+         Ok(Self {
+-            udev_device,
+             hid_device,
+             filtered_events: Default::default(),
+             state: None,
++            last_emitted_accel: None,
++            last_emitted_gyro: (0, 0, 0),
++            last_heartbeat: now,
++            last_motion_packet: now,
+         })
+     }
+ 
+-    //TODO: Using InputPlumber Capability enum prevents this driver from having the ability to be
+-    //a standalone crate. When this driver is eventually separated, refactor the Event type to
+-    //follow the pattern DeviceEvent(Event, Value) and create a match table for
+-    //Capability->Event/Event->Capability in the SourceDriver implementation.
+     pub fn update_filtered_events(&mut self, events: HashSet<Capability>) {
+         self.filtered_events = events;
+     }
+@@ -63,37 +167,54 @@ impl Driver {
      pub fn get_default_event_filter(
          &self,
      ) -> Result<HashSet<Capability>, Box<dyn Error + Send + Sync>> {
@@ -225,7 +778,7 @@ index 7fa1b91..091288e 100644
 -        };
 -
 -        Ok(filtered_events)
-+        // Explicitly enable Right Joy-Con IMU (filter out ONLY Left and Center)
++        // Explicitly enable Right Joy-Con IMU (filter out Left and Center)
 +        Ok(HashSet::from([
 +            Capability::Accelerometer(Source::Left),
 +            Capability::Accelerometer(Source::Center),
@@ -237,18 +790,125 @@ index 7fa1b91..091288e 100644
      /// Poll the device and read input reports
      pub fn poll(&mut self) -> Result<Vec<Event>, Box<dyn Error + Send + Sync>> {
 -        // Read data from the device into a buffer
-         let mut buf = [0; XINPUT_PACKET_SIZE];
-         let bytes_read = self
-             .hid_device
-@@ -137,7 +190,6 @@ impl Driver {
-         buf: [u8; XINPUT_PACKET_SIZE],
+-        let mut buf = [0; XINPUT_PACKET_SIZE];
+-        let bytes_read = self
+-            .hid_device
+-            .read_timeout(&mut buf[..], GAMEPAD_TIMEOUT)?;
+-
+-        if bytes_read > XINPUT_PACKET_SIZE {
+-            return Err("Invalid packet size for X-Input Data.".into());
++        let now = Instant::now();
++        let time_since_heartbeat = now.duration_since(self.last_heartbeat);
++        let time_since_motion = now.duration_since(self.last_motion_packet);
++
++        // Heartbeat / Keep-Alive logic:
++        // 1. Regular timer: send keep-alive every 3 seconds
++        // 2. Silence re-arm: if no motion packet received for >= 1500ms
++        if time_since_heartbeat >= Duration::from_secs(3) {
++            log::debug!("Legion Go: sending periodic IMU heartbeat");
++            self.send_heartbeat();
++            self.last_heartbeat = now;
++        } else if time_since_motion >= Duration::from_millis(1500) {
++            log::info!(
++                "Legion Go: IMU stream silence detected ({}ms), re-arming sensors",
++                time_since_motion.as_millis()
++            );
++            self.send_heartbeat();
++            self.last_heartbeat = now;
++            // Prevent spamming re-arm on every 8ms cycle while hardware wakes up
++            self.last_motion_packet = now;
++        }
++
++        let mut buf = [0u8; 64];
++        let bytes_read = match self.hid_device.read_timeout(&mut buf[..], GAMEPAD_TIMEOUT) {
++            Ok(n) => n,
++            Err(e) => {
++                let err_str = e.to_string();
++                if err_str.contains("device disconnected") || err_str.contains("No such device") {
++                    return Err(e.into());
++                }
++                log::debug!("Legion Go: transient read_timeout error: {e}");
++                0
++            }
++        };
++
++        if bytes_read == 0 || bytes_read < XINPUT_PACKET_SIZE {
++            return Ok(vec![]);
+         }
+ 
+         let report_id = buf[0];
+@@ -102,29 +223,27 @@ impl Driver {
+         // Configuration event responses happen on the same endpoint. If this data packet isn't
+         // specifically xinput data it can crash the driver, so block it.
+         if command_id != XINPUT_COMMAND_ID {
+-            //log::trace!("Got event that isn't xinput data, skipping");
+             return Ok(vec![]);
+         }
+-        let slice = &buf[..bytes_read];
+-        //log::trace!("Got Report ID: {report_id}");
+-        //log::trace!("Got Report Size: {bytes_read}");
+-        //log::trace!("Raw Data: {:02x?}", buf);
+ 
+         let events = match report_id {
+             XINPUT_DATA => {
+-                if bytes_read != XINPUT_PACKET_SIZE {
+-                    return Err("Invalid packet size for X-Input Data.".into());
++                log::info!("Received IMU report: len={}", buf.len());
++                match buf[..XINPUT_PACKET_SIZE].try_into() {
++                    Ok(sized_buf) => match self.handle_xinput_report(sized_buf) {
++                        Ok(ev) => ev,
++                        Err(e) => {
++                            log::warn!("Legion Go: failed to handle xinput report: {e}");
++                            vec![]
++                        }
++                    },
++                    Err(e) => {
++                        log::warn!("Legion Go: buffer slice error: {e}");
++                        vec![]
++                    }
+                 }
+-                // Handle the incoming input report
+-                let sized_buf = slice.try_into()?;
+-
+-                self.handle_xinput_report(sized_buf)?
+-            }
+-            _ => {
+-                //log::trace!("Invalid Report ID.");
+-                let events = vec![];
+-                events
+             }
++            _ => vec![],
+         };
+ 
+         Ok(events)
+@@ -138,10 +257,22 @@ impl Driver {
      ) -> Result<Vec<Event>, Box<dyn Error + Send + Sync>> {
          let input_report = XInputDataReport::unpack(&buf)?;
--
-         // Print input report for debugging
-         //log::debug!("--- Input report ---");
-         //log::debug!("{input_report}");
-@@ -422,18 +474,23 @@ impl Driver {
+ 
+-        // Print input report for debugging
+-        //log::debug!("--- Input report ---");
+-        //log::debug!("{input_report}");
+-        //log::debug!(" ---- End Report ----");
++        // If either controller reports active IMU readings, update last_motion_packet timestamp
++        if input_report.right_accel_x != 0
++            || input_report.right_accel_y != 0
++            || input_report.right_accel_z != 0
++            || input_report.right_gyro_x != 0
++            || input_report.right_gyro_y != 0
++            || input_report.right_gyro_z != 0
++            || input_report.left_accel_x != 0
++            || input_report.left_accel_y != 0
++            || input_report.left_accel_z != 0
++            || input_report.left_gyro_x != 0
++            || input_report.left_gyro_y != 0
++            || input_report.left_gyro_z != 0
++        {
++            self.last_motion_packet = Instant::now();
++        }
+ 
+         // Update the state
+         let old_state = self.update_xinput_state(input_report);
+@@ -422,18 +553,50 @@ impl Driver {
                      yaw: state.left_accel_z,
                  })))
              }
@@ -259,30 +919,75 @@ index 7fa1b91..091288e 100644
 -                    || state.right_accel_y != old_state.right_accel_y
 -                    || state.right_accel_z != old_state.right_accel_z)
 -            {
-+            // Accel: emit on initial packet or when change exceeds noise threshold (25 LSB ~ 0.05G)
-+            const ACCEL_NOISE_THRESHOLD: i16 = 25;
-+            let emit_accel = match self.last_emitted_accel {
-+                None => true,
-+                Some((lx, ly, lz)) => {
-+                    (state.right_accel_x - lx).abs() > ACCEL_NOISE_THRESHOLD
-+                        || (state.right_accel_y - ly).abs() > ACCEL_NOISE_THRESHOLD
-+                        || (state.right_accel_z - lz).abs() > ACCEL_NOISE_THRESHOLD
-+                }
-+            };
-+            if emit_accel {
-+                self.last_emitted_accel = Some((state.right_accel_x, state.right_accel_y, state.right_accel_z));
-                 events.push(Event::Axis(AxisEvent::RightAccel(ImuAxisInput {
-                     pitch: -state.right_accel_x,
+-                events.push(Event::Axis(AxisEvent::RightAccel(ImuAxisInput {
+-                    pitch: -state.right_accel_x,
 -                    roll: -state.right_accel_y,
-+                    roll: state.right_accel_y,
-                     yaw: state.right_accel_z,
+-                    yaw: state.right_accel_z,
 -                })))
-+                })));
++            // HHD hardware glitch filter: controller firmware has a bug where it randomly emits
++            // 254 or 255 (or -254 / -255) on gyro axes as corrupt glitch packets.
++            let is_gyro_glitch = |v: i16| -> bool {
++                let a = v.abs();
++                a == 254 || a == 255
++            };
++
++            // Accel: emit on initial packet, when change exceeds noise threshold (25 LSB ~ 0.05G),
++            // or periodically (every ~15 reports / 120ms) so that gravity is never lost after target clear_state.
++            const ACCEL_NOISE_THRESHOLD: i16 = 25;
++            let has_accel_data = state.right_accel_x != 0 || state.right_accel_y != 0 || state.right_accel_z != 0;
++            if has_accel_data {
++                let emit_accel = match self.last_emitted_accel {
++                    None => true,
++                    Some((lx, ly, lz, count)) => {
++                        count >= 15
++                            || (state.right_accel_x - lx).abs() > ACCEL_NOISE_THRESHOLD
++                            || (state.right_accel_y - ly).abs() > ACCEL_NOISE_THRESHOLD
++                            || (state.right_accel_z - lz).abs() > ACCEL_NOISE_THRESHOLD
++                    }
++                };
++                if !self.filtered_events.contains(&Capability::Accelerometer(Source::Right)) && emit_accel {
++                    let prev_count = self.last_emitted_accel.map(|(_, _, _, c)| c).unwrap_or(0);
++                    let next_count = if prev_count >= 15 { 0 } else { prev_count + 1 };
++                    self.last_emitted_accel = Some((state.right_accel_x, state.right_accel_y, state.right_accel_z, next_count));
++                    events.push(Event::Axis(AxisEvent::RightAccel(ImuAxisInput {
++                        pitch: -state.right_accel_x,
++                        roll: state.right_accel_y,
++                        yaw: state.right_accel_z,
++                    })));
++                } else if let Some((lx, ly, lz, count)) = self.last_emitted_accel {
++                    self.last_emitted_accel = Some((lx, ly, lz, count + 1));
++                }
++            } else if let Some((lx, ly, lz, count)) = self.last_emitted_accel {
++                // Sensor temporarily silent: keep Steam Deck UHID gravity vector alive with last known valid reading
++                let next_count = if count >= 15 { 0 } else { count + 1 };
++                self.last_emitted_accel = Some((lx, ly, lz, next_count));
++                if !self.filtered_events.contains(&Capability::Accelerometer(Source::Right)) && count >= 15 {
++                    events.push(Event::Axis(AxisEvent::RightAccel(ImuAxisInput {
++                        pitch: -lx,
++                        roll: ly,
++                        yaw: lz,
++                    })));
++                }
              }
              if !self
                  .filtered_events
-@@ -464,18 +521,23 @@ impl Driver {
-                     yaw: state.left_gyro_z,
+@@ -454,28 +617,42 @@ impl Driver {
+             if !self
+                 .filtered_events
+                 .contains(&Capability::Gyroscope(Source::Left))
++                && !is_gyro_glitch(state.left_gyro_x)
++                && !is_gyro_glitch(state.left_gyro_y)
++                && !is_gyro_glitch(state.left_gyro_z)
+                 && (state.left_gyro_x != old_state.left_gyro_x
+                     || state.left_gyro_y != old_state.left_gyro_y
+                     || state.left_gyro_z != old_state.left_gyro_z)
+             {
+                 events.push(Event::Axis(AxisEvent::LeftGyro(ImuAxisInput {
+                     pitch: -state.left_gyro_x,
+-                    roll: state.left_gyro_y,
+-                    yaw: state.left_gyro_z,
++                    roll: -state.left_gyro_y,
++                    yaw: -state.left_gyro_z,
                  })))
              }
 -            if !self
@@ -291,37 +996,58 @@ index 7fa1b91..091288e 100644
 -                && (state.right_gyro_x != old_state.right_gyro_x
 -                    || state.right_gyro_y != old_state.right_gyro_y
 -                    || state.right_gyro_z != old_state.right_gyro_z)
--            {
-+            // Gyro: filter MEMS sensor noise (< 16 LSB ~ 1 deg/s).
-+            // Emit when motion is detected, and emit (0, 0, 0) once when transitioning to rest.
-+            const GYRO_NOISE_DEADZONE: i16 = 16;
-+            let gx = if state.right_gyro_x.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_x };
-+            let gy = if state.right_gyro_y.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_y };
-+            let gz = if state.right_gyro_z.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_z };
-+
-+            let is_moving = gx != 0 || gy != 0 || gz != 0;
-+            let was_moving = self.last_emitted_gyro.0 != 0 || self.last_emitted_gyro.1 != 0 || self.last_emitted_gyro.2 != 0;
-+
-+            if is_moving || was_moving {
-+                self.last_emitted_gyro = (gx, gy, gz);
-                 events.push(Event::Axis(AxisEvent::RightGyro(ImuAxisInput {
++            if !self.filtered_events.contains(&Capability::Gyroscope(Source::Right))
++                && !is_gyro_glitch(state.right_gyro_x)
++                && !is_gyro_glitch(state.right_gyro_y)
++                && !is_gyro_glitch(state.right_gyro_z)
+             {
+-                events.push(Event::Axis(AxisEvent::RightGyro(ImuAxisInput {
 -                    pitch: -state.right_gyro_x,
 -                    roll: state.right_gyro_y,
 -                    yaw: state.right_gyro_z,
 -                })))
-+                    pitch: -gx,
-+                    roll: -gy,
-+                    yaw: gz,
-+                })));
++                // Gyro: filter MEMS sensor noise (< 16 LSB ~ 1 deg/s).
++                // Emit when motion is detected, and emit (0, 0, 0) once when transitioning to rest.
++                const GYRO_NOISE_DEADZONE: i16 = 16;
++                let gx = if state.right_gyro_x.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_x };
++                let gy = if state.right_gyro_y.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_y };
++                let gz = if state.right_gyro_z.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_z };
++
++                let is_moving = gx != 0 || gy != 0 || gz != 0;
++                let was_moving = self.last_emitted_gyro.0 != 0 || self.last_emitted_gyro.1 != 0 || self.last_emitted_gyro.2 != 0;
++
++                if is_moving || was_moving {
++                    self.last_emitted_gyro = (gx, gy, gz);
++                    events.push(Event::Axis(AxisEvent::RightGyro(ImuAxisInput {
++                        pitch: -gx,
++                        roll: -gy,
++                        yaw: gz,
++                    })));
++                }
              }
  
              if !self
 diff --git a/src/drivers/lego/hid_report.rs b/src/drivers/lego/hid_report.rs
-index 755f258..a90c43e 100644
+index 755f258..cd0fe87 100644
 --- a/src/drivers/lego/hid_report.rs
 +++ b/src/drivers/lego/hid_report.rs
-@@ -285,18 +285,18 @@ pub struct XInputDataReport {
+@@ -274,29 +274,29 @@ pub struct XInputDataReport {
+     #[packed_field(bytes = "35..=36", endian = "msb")]
+     pub left_accel_x: i16,
+     #[packed_field(bytes = "37..=38", endian = "msb")]
+-    pub left_accel_y: i16,
+-    #[packed_field(bytes = "39..=40", endian = "msb")]
+     pub left_accel_z: i16,
++    #[packed_field(bytes = "39..=40", endian = "msb")]
++    pub left_accel_y: i16,
+     #[packed_field(bytes = "41..=42", endian = "msb")]
+     pub left_gyro_x: i16,
+     #[packed_field(bytes = "43..=44", endian = "msb")]
+-    pub left_gyro_y: i16,
+-    #[packed_field(bytes = "45..=46", endian = "msb")]
      pub left_gyro_z: i16,
++    #[packed_field(bytes = "45..=46", endian = "msb")]
++    pub left_gyro_y: i16,
      #[packed_field(bytes = "47")]
      pub right_imu_timestamp: u8,
 +    #[packed_field(bytes = "48..=49", endian = "msb")]
@@ -345,8 +1071,158 @@ index 755f258..a90c43e 100644
  }
  
  #[derive(PackedStruct, Debug, Copy, Clone, PartialEq)]
+diff --git a/src/drivers/lego/mod.rs b/src/drivers/lego/mod.rs
+index 0b36e17..0a7ad44 100644
+--- a/src/drivers/lego/mod.rs
++++ b/src/drivers/lego/mod.rs
+@@ -78,6 +78,7 @@ pub const STICK_Y_MAX: f64 = 255.0;
+ pub const STICK_Y_MIN: f64 = 0.0;
+ pub const TRIGG_MAX: f64 = 255.0;
+ 
++#[allow(dead_code)]
+ const DEFAULT_EVENT_FILTER: [Capability; 6] = [
+     Capability::Accelerometer(Source::Center),
+     Capability::Accelerometer(Source::Left),
+@@ -87,15 +88,10 @@ const DEFAULT_EVENT_FILTER: [Capability; 6] = [
+     Capability::Gyroscope(Source::Right),
+ ];
+ 
+-//TODO: Default to Source::Right. The Legion Go 1 left and right handle y axis are inverted from
+-//each other and cancel out. To fix this we can use only the right handle. The kernel driver IMU
+-//enablement is currently broken. Once fixed upstream and in jupiter/linux_integration switch to
+-//using right handle first.
++#[allow(dead_code)]
+ const HID_LENOVO_GO_FILTER: [Capability; 4] = [
+-    //Capability::Accelerometer(Source::Center),
+     Capability::Accelerometer(Source::Left),
+     Capability::Accelerometer(Source::Right),
+-    //Capability::Gyroscope(Source::Center),
+     Capability::Gyroscope(Source::Left),
+     Capability::Gyroscope(Source::Right),
+ ];
+diff --git a/src/input/source/hidraw.rs b/src/input/source/hidraw.rs
+index e11cd6b..7572057 100644
+--- a/src/input/source/hidraw.rs
++++ b/src/input/source/hidraw.rs
+@@ -382,7 +382,7 @@ impl HidRawDevice {
+             }
+             DriverType::LegionGo => {
+                 let options = SourceDriverOptions {
+-                    poll_rate: Duration::from_millis(8),
++                    poll_rate: Duration::from_millis(1),
+                     buffer_size: 2048,
+                 };
+                 let device = LegionGoController::new(device_info.clone())?;
+@@ -397,7 +397,7 @@ impl HidRawDevice {
+             }
+             DriverType::LegionGo2 => {
+                 let options = SourceDriverOptions {
+-                    poll_rate: Duration::from_millis(8),
++                    poll_rate: Duration::from_millis(1),
+                     buffer_size: 2048,
+                 };
+                 let device = LegionGo2Controller::new(device_info.clone())?;
+diff --git a/src/input/source/hidraw/legion_go.rs b/src/input/source/hidraw/legion_go.rs
+index 37f735b..5a620a4 100644
+--- a/src/input/source/hidraw/legion_go.rs
++++ b/src/input/source/hidraw/legion_go.rs
+@@ -10,7 +10,7 @@ use crate::{
+     input::{
+         capability::{
+             Capability, Gamepad, GamepadAxis, GamepadButton, GamepadTrigger, Mouse, MouseButton,
+-            Touch, TouchButton, Touchpad,
++            Source, Touch, TouchButton, Touchpad,
+         },
+         event::{
+             native::NativeEvent,
+@@ -163,7 +163,30 @@ impl LegionGoController {
+                     Capability::Touchpad(Touchpad::RightPad(Touch::Motion)),
+                     normalize_axis_value(axis),
+                 ),
+-                _ => NativeEvent::new(Capability::NotImplemented, InputValue::None),
++                AxisEvent::LeftAccel(_) => NativeEvent::new(
++                    Capability::Accelerometer(Source::Left),
++                    normalize_axis_value(axis),
++                ),
++                AxisEvent::LeftGyro(_) => NativeEvent::new(
++                    Capability::Gyroscope(Source::Left),
++                    normalize_axis_value(axis),
++                ),
++                AxisEvent::RightAccel(_) => NativeEvent::new(
++                    Capability::Accelerometer(Source::Right),
++                    normalize_axis_value(axis),
++                ),
++                AxisEvent::RightGyro(_) => NativeEvent::new(
++                    Capability::Gyroscope(Source::Right),
++                    normalize_axis_value(axis),
++                ),
++                AxisEvent::MultiAccel(_) => NativeEvent::new(
++                    Capability::Accelerometer(Source::Center),
++                    normalize_axis_value(axis),
++                ),
++                AxisEvent::MultiGyro(_) => NativeEvent::new(
++                    Capability::Gyroscope(Source::Center),
++                    normalize_axis_value(axis),
++                ),
+             },
+             event::Event::Trigger(trigg) => match trigg.clone() {
+                 event::TriggerEvent::ATriggerL(_) => NativeEvent::new(
+@@ -208,6 +231,17 @@ impl SourceInputDevice for LegionGoController {
+         self.driver.update_filtered_events(events);
+         Ok(())
+     }
++
++    fn get_default_event_filter(&self) -> Result<HashSet<Capability>, InputError> {
++        let filtered_events = self.driver.get_default_event_filter();
++        let filtered_events = match filtered_events {
++            Ok(events) => events,
++            Err(e) => {
++                return Err(format!("Failed to get default event filter: {:?}", e).into());
++            }
++        };
++        Ok(filtered_events)
++    }
+ }
+ 
+ impl SourceOutputDevice for LegionGoController {}
+@@ -248,6 +282,22 @@ fn normalize_axis_value(event: AxisEvent) -> InputValue {
+ 
+             InputValue::Vector2 { x, y }
+         }
++        AxisEvent::LeftAccel(value)
++        | AxisEvent::RightAccel(value)
++        | AxisEvent::MultiAccel(value) => InputValue::Vector3 {
++            // Scale by 3.542 to convert controller raw LSB (~4625 LSB/1G) to Steam Deck UHID 16384 LSB/1G
++            x: Some(value.pitch as f64 * 3.542),
++            y: Some(value.roll as f64 * 3.542),
++            z: Some(value.yaw as f64 * 3.542),
++        },
++        AxisEvent::LeftGyro(value) | AxisEvent::RightGyro(value) | AxisEvent::MultiGyro(value) => {
++            // 1:1 standard gyro scaling
++            InputValue::Vector3 {
++                x: Some(value.pitch as f64 * 1.0),
++                y: Some(value.yaw as f64 * 1.0),
++                z: Some(value.roll as f64 * 1.0),
++            }
++        }
+         _ => InputValue::None,
+     }
+ }
+@@ -273,6 +323,12 @@ fn normalize_trigger_value(event: event::TriggerEvent) -> InputValue {
+ }
+ /// List of all capabilities that the Legion Go driver implements
+ pub const CAPABILITIES: &[Capability] = &[
++    Capability::Accelerometer(Source::Center),
++    Capability::Accelerometer(Source::Left),
++    Capability::Accelerometer(Source::Right),
++    Capability::Gyroscope(Source::Center),
++    Capability::Gyroscope(Source::Left),
++    Capability::Gyroscope(Source::Right),
+     Capability::Gamepad(Gamepad::Axis(GamepadAxis::LeftStick)),
+     Capability::Gamepad(Gamepad::Axis(GamepadAxis::RightStick)),
+     Capability::Gamepad(Gamepad::Button(GamepadButton::DPadDown)),
 diff --git a/src/input/source/hidraw/legion_go2.rs b/src/input/source/hidraw/legion_go2.rs
-index 1ad56bd..bbe4457 100644
+index 1ad56bd..d46c2bc 100644
 --- a/src/input/source/hidraw/legion_go2.rs
 +++ b/src/input/source/hidraw/legion_go2.rs
 @@ -296,15 +296,17 @@ fn normalize_axis_value(event: AxisEvent) -> InputValue {
@@ -356,20 +1232,20 @@ index 1ad56bd..bbe4457 100644
 -            x: Some(value.pitch as f64),
 -            y: Some(value.roll as f64),
 -            z: Some(value.yaw as f64),
-+            // Scale by 34.78 to convert controller ~471 LSB/1G to Steam Deck UHID 16384 LSB/1G
-+            x: Some(value.pitch as f64 * 34.78),
-+            y: Some(value.roll as f64 * 34.78),
-+            z: Some(value.yaw as f64 * 34.78),
++            // Scale by 3.542 to convert controller raw LSB (~4625 LSB/1G) to Steam Deck UHID 16384 LSB/1G
++            x: Some(value.pitch as f64 * 3.542),
++            y: Some(value.roll as f64 * 3.542),
++            z: Some(value.yaw as f64 * 3.542),
          },
          AxisEvent::LeftGyro(value) | AxisEvent::RightGyro(value) | AxisEvent::MultiGyro(value) => {
-+            // 12x gyro acceleration matching user preference and BMI driver scale
++            // 1:1 standard gyro scaling
              InputValue::Vector3 {
 -                x: Some(value.pitch as f64),
 -                y: Some(value.roll as f64),
 -                z: Some(value.yaw as f64),
-+                x: Some(value.pitch as f64 * 12.0),
-+                y: Some(value.yaw as f64 * 12.0),
-+                z: Some(value.roll as f64 * 12.0),
++                x: Some(value.pitch as f64 * 1.0),
++                y: Some(value.yaw as f64 * 1.0),
++                z: Some(value.roll as f64 * 1.0),
              }
          }
          _ => InputValue::None,
@@ -427,7 +1303,7 @@ index 737daca..688a219 100644
  pub struct AccelGyro3dImu {
      driver: Driver,
 diff --git a/src/input/target/dualsense.rs b/src/input/target/dualsense.rs
-index dbbc87e..cdd22d7 100644
+index dbbc87e..79d0077 100644
 --- a/src/input/target/dualsense.rs
 +++ b/src/input/target/dualsense.rs
 @@ -28,8 +28,8 @@ use crate::{
@@ -441,51 +1317,7 @@ index dbbc87e..cdd22d7 100644
          },
          composite_device::client::CompositeDeviceClient,
          event::{
-@@ -71,19 +71,14 @@ pub struct DualSenseHardware {
- 
- impl DualSenseHardware {
-     pub fn new(model: ModelType, bus_type: BusType) -> Self {
--        // "e8:47:3a:d6:e7:74"
--        //let mac_addr = [0x74, 0xe7, 0xd6, 0x3a, 0x47, 0xe8];
--        let mut rng = rand::rng();
--        let mac_addr: [u8; 6] = [
--            rng.random(),
--            rng.random(),
--            rng.random(),
--            rng.random(),
--            rng.random(),
--            rng.random(),
--        ];
-+        // Fixed persistent MAC address so Steam and games retain controller ID,
-+        // layout configurations, and gyro calibrations across restarts.
-+        let mac_addr: [u8; 6] = match model {
-+            ModelType::Edge => [0x74, 0xe7, 0xd6, 0x3a, 0x47, 0xee],
-+            ModelType::Normal => [0x74, 0xe7, 0xd6, 0x3a, 0x47, 0xe8],
-+        };
-         log::debug!(
--            "Creating new DualSense Edge device using MAC Address: {:?}",
-+            "Creating new DualSense device using persistent MAC Address: {:?}",
-             mac_addr
-         );
- 
-@@ -97,15 +92,7 @@ impl DualSenseHardware {
- 
- impl Default for DualSenseHardware {
-     fn default() -> Self {
--        let mut rng = rand::rng();
--        let mac_addr: [u8; 6] = [
--            rng.random(),
--            rng.random(),
--            rng.random(),
--            rng.random(),
--            rng.random(),
--            rng.random(),
--        ];
-+        let mac_addr: [u8; 6] = [0x74, 0xe7, 0xd6, 0x3a, 0x47, 0xe8];
-         Self {
-             model: ModelType::Normal,
-             bus_type: BusType::Usb,
-@@ -636,29 +623,41 @@ impl DualSenseDevice {
+@@ -636,29 +636,41 @@ impl DualSenseDevice {
                      },
                  }
              }
@@ -547,7 +1379,7 @@ index dbbc87e..cdd22d7 100644
                      }
                  }
              }
-@@ -1006,6 +1005,12 @@ impl TargetInputDevice for DualSenseDevice {
+@@ -1006,6 +1018,12 @@ impl TargetInputDevice for DualSenseDevice {
              Capability::Gamepad(Gamepad::Button(GamepadButton::Start)),
              Capability::Gamepad(Gamepad::Button(GamepadButton::West)),
              Capability::Gamepad(Gamepad::Gyro),
@@ -560,7 +1392,7 @@ index dbbc87e..cdd22d7 100644
              Capability::Gamepad(Gamepad::Trigger(GamepadTrigger::LeftTrigger)),
              Capability::Gamepad(Gamepad::Trigger(GamepadTrigger::RightTrigger)),
              Capability::Touchpad(Touchpad::CenterPad(Touch::Button(TouchButton::Press))),
-@@ -1201,9 +1206,33 @@ fn denormalize_accel_value(value_meters_sec: f64) -> i16 {
+@@ -1201,9 +1219,33 @@ fn denormalize_accel_value(value_meters_sec: f64) -> i16 {
      value as i16
  }
  
@@ -572,16 +1404,16 @@ index dbbc87e..cdd22d7 100644
 +    // Check config file on first run (count == 0) and every 200 samples (~once per second)
 +    if count % 200 == 0 {
 +        let mult = if let Ok(s) = std::fs::read_to_string("/etc/inputplumber/ds5_gyro_multiplier") {
-+            s.trim().parse::<f64>().unwrap_or(2.5)
++            s.trim().parse::<f64>().unwrap_or(1.0)
 +        } else {
-+            2.5
++            1.0
 +        };
 +        MULTIPLIER_BITS.store(mult.to_bits(), std::sync::atomic::Ordering::Relaxed);
 +    }
 +
 +    let bits = MULTIPLIER_BITS.load(std::sync::atomic::Ordering::Relaxed);
 +    if bits == 0 {
-+        2.5
++        1.0
 +    } else {
 +        f64::from_bits(bits)
 +    }
@@ -589,7 +1421,7 @@ index dbbc87e..cdd22d7 100644
 +
  /// DualSense gyro values are measured in units of degrees per second.
 -/// InputPlumber gyro values are also measured in degrees per second.
-+/// Applies dynamic gyro multiplier (default 2.5x) and clamps safely to i16 bounds.
++/// Applies dynamic gyro multiplier (default 1.0x) and clamps safely to i16 bounds.
  fn denormalize_gyro_value(value_degrees_sec: f64) -> i16 {
 -    let value = value_degrees_sec;
 -    value as i16
