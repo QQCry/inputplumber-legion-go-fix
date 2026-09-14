@@ -2,7 +2,7 @@
 
 Complete solution, native HID driver patch, configuration profiles, and auto-repair scripts to enable fully functional, smooth 200 Hz gyroscope and motion aiming on the **Lenovo Legion Go** using **InputPlumber**, with persistent **DualSense (DS5)** and **Steam Deck (`deck-uhid`)** support.
 
-Includes a native reverse-engineered HID driver port to read the **detachable Right Controller IMU** directly via `hidraw`, bypassing tablet-only limitations.
+Includes a native reverse-engineered HID driver port (from HHD) to read the **detachable Right Controller IMU** directly via `hidraw`, bypassing tablet-only limitations.
 
 Works seamlessly in both **Desktop Mode** and **Gamescope (Steam Game Mode)** on Arch Linux, CachyOS, Bazzite, ChimeraOS, and other Linux distributions.
 
