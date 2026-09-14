@@ -1,6 +1,8 @@
-# InputPlumber Gyroscope & DualSense Fix for Lenovo Legion Go (83E1)
+# InputPlumber Native Gyroscope & Controller Fix for Lenovo Legion Go (83E1)
 
-Complete solution, source patch, configuration profiles, and auto-repair scripts to enable fully functional, smooth 200 Hz gyroscope and motion aiming on the **Lenovo Legion Go** using **InputPlumber**, with persistent **DualSense (DS5)** and **Steam Deck (`deck-uhid`)** support.
+Complete solution, native HID driver patch, configuration profiles, and auto-repair scripts to enable fully functional, smooth 200 Hz gyroscope and motion aiming on the **Lenovo Legion Go** using **InputPlumber**, with persistent **DualSense (DS5)** and **Steam Deck (`deck-uhid`)** support.
+
+Includes a native reverse-engineered HID driver port (from HHD) to read the **detachable Right Controller IMU** directly via `hidraw`, bypassing tablet-only limitations.
 
 Works seamlessly in both **Desktop Mode** and **Gamescope (Steam Game Mode)** on Arch Linux, CachyOS, Bazzite, ChimeraOS, and other Linux distributions.
 
@@ -8,29 +10,27 @@ Works seamlessly in both **Desktop Mode** and **Gamescope (Steam Game Mode)** on
 
 ## 🎯 What This Fix Solves
 
-1. **Dead/Disabled Gyro in Steam Input:**
-   * **Cause:** Stock InputPlumber configuration only defined `gyro_3d` in `50-legion_go.yaml`, omitting `accel_3d`. Steam Deck emulation (`deck-uhid`) reported `(0, 0, 0)` for gravity. Steam requires a 1G gravitational vector to calculate drift compensation and orientation; without it, Steam completely disables the IMU.
-   * **Fix:** Added `accel_3d` with the proper orientation matrix.
-2. **Internal IMU Filter Bug in InputPlumber Driver:**
-   * **Cause:** Upstream `src/drivers/iio_imu/driver.rs` actively disabled the internal AMD SFH tablet IMU whenever the `hid_lenovo_go` kernel driver was detected in `/proc/modules`.
-   * **Fix:** Removed this artificial event filter to keep the internal 200 Hz AMD Sensor Fusion Hub IMU active.
-3. **DualSense MAC Persistence (Lost Gyro Profiles on Reboot / Reconnection):**
-   * **Cause:** Upstream `src/input/target/dualsense.rs` generated a random Bluetooth MAC address (`rand::rng()`) on every virtual device creation. Steam treated every reconnection as a brand new device, resetting Gyro to "Disabled" and dropping user layouts and calibration.
-   * **Fix:** Hardcoded persistent MAC addresses (`e8:47:3a:d6:e7:74` for Normal, `e8:47:3a:d6:e7:ee` for Edge). Steam permanently remembers calibrations and layouts.
-4. **Dynamic Gyro Source Switching (Tablet vs. Docked Right Controller):**
-   * **Feature:** Allows seamlessly switching between the internal Tablet IMU (`Source::Center`) and the Right Joy-Con Controller IMU (`Source::Right`, tuned for docked mode) live without restarting games or InputPlumber.
-   * **Fix:** Added polling of `/etc/inputplumber/gyro_source` in `src/input/target/mod.rs` and filtered inputs in both `steam_deck_uhid` and `dualsense`.
-5. **AMD Sensor Fusion Hub (SFH) Scale Correction:**
-   * **Cause:** Linux AMD SFH driver scaling attributes produced only ~1,527 LSB at 1G instead of the ~16,384 LSB expected by Steam Deck UHID (factor of 10.73x off).
-   * **Fix:** Calibrated `ACCEL_SCALE_FACTOR` by 10.73x to match the exact 1G = 16384 UHID standard.
-6. **Ergonomic Handheld Gyro Sensitivity & 200 Hz Sampling:**
-   * **Cause:** The Legion Go's 8.8" display makes large hand tilts awkward. Stock gyro scaling felt very sluggish.
-   * **Fix:** Increased angular velocity scaling to 12.0x and boosted the IIO driver polling rate to 5ms (200 Hz), matching Handheld Daemon (HHD) performance.
+1. **Native Right-Controller IMU Driver (Ported from HHD):**
+   * **Cause:** Upstream InputPlumber only supported the internal tablet IMU via Linux IIO/AMD SFH. The detachable right Joy-Con sensor remained dark due to Lenovo's proprietary HID protocol.
+   * **Fix:** Implemented native HID handling in `go1_driver.rs` and `go2_driver.rs`. It communicates via `hidraw` on Interface 2, sending raw 7-byte initialization handshakes (`0x6A 0x02` / `0x07`) to unlock high-rate 16-bit motion streaming from the controller MCU.
+2. **Dead/Disabled Gyro in Steam Input (Missing Gravitational Vector):**
+   * **Cause:** Stock InputPlumber configuration omitted `accel_3d`. Steam Deck emulation (`deck-uhid`) reported `(0, 0, 0)` for gravity. Steam requires a 1G gravitational vector to calculate drift compensation and orientation; without it, Steam completely ignores the IMU.
+   * **Fix:** Added `accel_3d` with proper orientation mapping and cyclical 120 ms keep-alive gravity broadcasts.
+3. **Hotplug & Detach Resilience (MCU Reset Recovery):**
+   * **Cause:** Docking or undocking the controller triggers an MCU power reset (`0x61eb` <-> `0x61ed`), dropping motion streaming and breaking `hidraw` polling loops.
+   * **Fix:** Reconnect handling detects controller state changes, re-executes the unpadded 7-byte wake-up handshake, and cleanly rebinds the polling thread without crashing the daemon.
+4. **Firmware Glitch Filter & Linear Calibration:**
+   * **Cause:** Lenovo's firmware intermittently transmits spurious `0x00FE` / `0x00FF` gyro packets, causing micro-stutters and sudden view snaps. Furthermore, excessive artificial multipliers caused immediate 16-bit clipping in Steam.
+   * **Fix:** Implemented an exact byte glitch filter (dropping invalid packets) and normalized scaling to a clean 1:1 ratio matching the HHD reference, allowing native Steam Input sliders to function properly.
+5. **DualSense MAC Persistence (Lost Gyro Profiles on Reboot):**
+   * **Cause:** Upstream `src/input/target/dualsense.rs` generated a random Bluetooth MAC address on every virtual device creation. Steam treated every reconnection as a brand new controller, resetting Gyro to "Disabled" and wiping layouts.
+   * **Fix:** Hardcoded persistent MAC addresses (`e8:47:3a:d6:e7:74` for Normal, `e8:47:3a:d6:e7:ee` for Edge). Steam permanently remembers calibrations and per-game mappings.
+6. **Dynamic Gyro Source Switching (Tablet vs. Detached Right Controller):**
+   * **Feature:** Allows seamlessly switching between the internal Tablet IMU (`Source::Center`) and the Right Joy-Con Controller IMU (`Source::Right`, for detached/docked play) on-the-fly without restarting games or InputPlumber.
+   * **Fix:** Added live polling of `/etc/inputplumber/gyro_source`.
 7. **Touchpad / Mouse Lag Prevention:**
    * **Cause:** Enabling MCU IMU bypass (`0x03`) turns off internal hardware filtering on the optical trackpad in the controller firmware, causing cursor jumping and stutter.
-   * **Fix:** Udev rules and driver logic ensure bypass remains disabled (`0x00`), keeping the touchpad smooth.
-8. **Steam Gyro Drift Zero-Out:**
-   * Prevents corrupted Steam auto-calibration drift values from pulling the camera down.
+   * **Fix:** Driver logic enforces `bypass=0x00`, keeping the optical sensor smooth while IMU streaming remains fully active.
 
 ---
 
@@ -38,14 +38,12 @@ Works seamlessly in both **Desktop Mode** and **Gamescope (Steam Game Mode)** on
 
 | File | Description |
 | :--- | :--- |
-| `fix-inputplumber.sh` | All-in-one script: restores patched binary, updates configs, sets udev rules, and can rebuild from source |
-| `install-dualsense-12x.sh` | Fast installer script for the patched DualSense 12x binary |
+| `enable-right-gyro-hhd.sh` | Main installer script: installs the patched native-IMU binary and restarts the service |
 | `set-gyro-source.sh` | Helper script to switch active gyro source between tablet and controller on-the-fly |
 | `inputplumber-legiongo.patch` | Clean, standalone Git patch against upstream InputPlumber (`ShadowBlip/InputPlumber`) |
 | `50-legion_go.yaml` | Corrected InputPlumber device configuration profile (`deck-uhid` default) |
-| `99-inputplumber-device-setup.rules` | Udev rules to prevent mouse lag and configure controller mode |
-| `test-gyro.py` | Real-time terminal diagnostic tool for Steam Deck UHID IMU data |
-| `test-dualsense-gyro.py` | Real-time terminal diagnostic tool for DualSense IMU data |
+| `99-inputplumber-device-setup.rules` | Udev rules to ensure permissions for `hidraw` controller nodes |
+| `test-gyro.py` | Real-time terminal diagnostic tool verifying Pitch, Yaw, Roll, and 1G Accel |
 
 ---
 
@@ -53,58 +51,4 @@ Works seamlessly in both **Desktop Mode** and **Gamescope (Steam Game Mode)** on
 
 ### 1. Apply Fix / Install Patched Binary
 ```bash
-sudo bash fix-inputplumber.sh
-# or
-sudo bash install-dualsense-12x.sh
-```
-This installs the optimized binary, verifies configuration, sets udev rules, cleans Steam drift, and restarts `inputplumber.service`.
-
-### 2. Switch Gyro Source On-the-Fly
-Switch motion sensors anytime without restarting InputPlumber or games:
-```bash
-# Switch to right controller sensor (docked mode)
-~/set-gyro-source.sh controller
-
-# Switch back to internal tablet sensor (handheld mode)
-~/set-gyro-source.sh tablet
-
-# Check active sensor status
-~/set-gyro-source.sh status
-```
-
-### 3. Auto-Repair on Package Updates (Pacman Hook)
-On Arch Linux / CachyOS, package updates (`pacman -Syu`) overwrite `/usr/bin/inputplumber`. To automatically re-apply the fix on every system update:
-```bash
-sudo bash fix-inputplumber.sh --hook
-```
-
-### 4. Build & Patch Fresh from Upstream Source
-```bash
-sudo bash fix-inputplumber.sh --rebuild
-```
-Clones upstream InputPlumber, applies `inputplumber-legiongo.patch`, compiles release binary with Cargo, and installs it.
-
-### 5. Live Sensor Test
-Verify motion controls in real-time:
-```bash
-# For Steam Deck (deck-uhid)
-python3 test-gyro.py
-
-# For DualSense (ds5)
-python3 test-dualsense-gyro.py
-```
-
----
-
-## 🎮 In-Game Gyro Setup (Steam Input)
-
-1. Open Steam (Desktop or Gamescope Game Mode).
-2. Go to **Controller Settings** $\rightarrow$ **Edit Layout** $\rightarrow$ **Gyro**.
-3. Set Gyro Behavior to **As Mouse** (recommended for FPS) or **As Right Joystick**.
-4. Set Gyro Enable Button to **Always On** or **Left Trigger Full Pull** (Aim Down Sights).
-5. In **Steam Settings $\rightarrow$ Controller $\rightarrow$ Calibration $\rightarrow$ Gyroscope**, verify that the artificial horizon is level and responsive.
-
----
-
-## 📜 License
-MIT License
+sudo bash enable-right-gyro-hhd.sh
