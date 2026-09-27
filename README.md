@@ -91,6 +91,10 @@ python3 test-dualsense-gyro.py
 ### 5. Build & Patch Fresh from Upstream Source
 To compile directly from source using the included patch:
 ```bash
+sudo bash ~/fix-inputplumber.sh
+```
+
+```bash
 sudo bash fix-inputplumber.sh --rebuild
 ```
 
