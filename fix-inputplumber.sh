@@ -2,20 +2,20 @@
 # ==============================================================================
 #  InputPlumber Legion Go Gyro Fix & Auto-Updater
 #  ----------------------------------------------------------------------------
-#  Repariert und sichert den Gyroskop- und Beschleunigungssensor-Support
-#  für das Lenovo Legion Go nach Upstream-Updates von InputPlumber.
+#  Repairs and safeguards gyroscope and accelerometer support
+#  for Lenovo Legion Go across upstream InputPlumber updates.
 #
-#  Nutzung:
-#    sudo bash ~/fix-inputplumber.sh            (Schneller 1-Klick Fix / Wiederherstellung)
-#    sudo bash ~/fix-inputplumber.sh --rebuild  (Aus neuester Quelle patchen & kompilieren)
-#    sudo bash ~/fix-inputplumber.sh --hook     (Pacman-Hook für automatische Updates einrichten)
-#    sudo bash ~/fix-inputplumber.sh --status   (System- & Sensor-Status anzeigen)
-#    sudo bash ~/fix-inputplumber.sh --test     (Live-Sensortest starten)
+#  Usage:
+#    sudo bash ~/fix-inputplumber.sh            (Quick 1-click fix / restore)
+#    sudo bash ~/fix-inputplumber.sh --rebuild  (Patch & compile from latest source)
+#    sudo bash ~/fix-inputplumber.sh --hook     (Set up automated Pacman update hook)
+#    sudo bash ~/fix-inputplumber.sh --status   (Display system & sensor status)
+#    sudo bash ~/fix-inputplumber.sh --test     (Launch real-time sensor diagnostic)
 # ==============================================================================
 
 set -e
 
-# Farben für formatierte Ausgabe
+# Output formatting colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -38,13 +38,13 @@ STEAM_CONFIG_DIR="/home/${USER_NAME}/.local/share/Steam/config"
 
 check_root() {
   if [ "$EUID" -ne 0 ]; then
-    echo -e "${YELLOW}[*] Root-Rechte erforderlich. Starte mit sudo...${NC}"
+    echo -e "${YELLOW}[*] Root privileges required. Re-launching with sudo...${NC}"
     exec sudo bash "$0" "$@"
   fi
 }
 
 # ------------------------------------------------------------------------------
-# 1. Prüffunktion: Ist das aktuell installierte Binary bereits gepatcht?
+# 1. Verification: Is the installed binary already patched?
 # ------------------------------------------------------------------------------
 is_binary_patched() {
   local bin="${1:-$TARGET_BIN}"
@@ -58,23 +58,23 @@ is_binary_patched() {
 }
 
 # ------------------------------------------------------------------------------
-# 2. Konfiguration /etc/inputplumber/devices.d/50-legion_go.yaml prüfen & fixen
+# 2. Check & fix /etc/inputplumber/devices.d/50-legion_go.yaml
 # ------------------------------------------------------------------------------
 fix_yaml_config() {
-  echo -e "${BLUE}[*] Prüfe Konfiguration: ${CONFIG_FILE}...${NC}"
+  echo -e "${BLUE}[*] Checking configuration: ${CONFIG_FILE}...${NC}"
   mkdir -p "$(dirname "$CONFIG_FILE")"
 
   if [ ! -f "$CONFIG_FILE" ]; then
     if [ -f "/usr/share/inputplumber/devices/50-legion_go.yaml" ]; then
       cp "/usr/share/inputplumber/devices/50-legion_go.yaml" "$CONFIG_FILE"
-      echo -e "${YELLOW}    Basisdatei aus /usr/share kopiert.${NC}"
+      echo -e "${YELLOW}    Copied template from /usr/share.${NC}"
     else
-      echo -e "${RED}[-] Weder $CONFIG_FILE noch Vorlage in /usr/share gefunden!${NC}"
+      echo -e "${RED}[-] Neither $CONFIG_FILE nor template in /usr/share found!${NC}"
       return 1
     fi
   fi
 
-  # Backup anlegen, falls noch nicht vorhanden
+  # Create backup if not already present
   if [ ! -f "${CONFIG_FILE}.orig" ]; then
     cp "$CONFIG_FILE" "${CONFIG_FILE}.orig"
   fi
@@ -87,11 +87,11 @@ try:
     with open(path, "r") as f:
         c = f.read()
 except Exception as e:
-    sys.exit(f"Fehler beim Lesen: {e}")
+    sys.exit(f"Read error: {e}")
 
 changed = False
 
-# 1. target_devices auf deck-uhid sicherstellen (für native ABXY Steam Deck Glyphen)
+# 1. Ensure target_devices is set to deck-uhid (for native ABXY Steam Deck glyphs)
 if "- deck-uhid" not in c:
     if "- xbox-elite" in c:
         c = c.replace("- xbox-elite", "- deck-uhid")
@@ -100,7 +100,7 @@ if "- deck-uhid" not in c:
         c = c.replace("target_devices:", "target_devices:\n  - deck-uhid")
         changed = True
 
-# 2. accel_3d & gyro_3d Blöcke mit korrekter Mount-Matrix sicherstellen
+# 2. Ensure accel_3d & gyro_3d blocks with correct mount matrix are present
 imu_target = """  # IMU
   - group: imu
     iio:
@@ -118,7 +118,6 @@ imu_target = """  # IMU
         z: [0, 0, 1]"""
 
 if "name: accel_3d" not in c:
-    # Suche bestehenden IMU- oder gyro_3d-Abschnitt
     pat = r"- group:\s*imu\s*\n\s*iio:\s*\n\s*name:\s*gyro_3d[\s\S]*?(?=(\n\s*- group:|\noptions:|\ntarget_devices:|\Z))"
     if re.search(pat, c):
         c = re.sub(pat, imu_target.strip() + "\n", c)
@@ -133,24 +132,24 @@ if "name: accel_3d" not in c:
 if changed:
     with open(path, "w") as f:
         f.write(c)
-    print("    [+] 50-legion_go.yaml erfolgreich aktualisiert (accel_3d & deck-uhid hinzugefügt).")
+    print("    [+] 50-legion_go.yaml successfully updated (added accel_3d & deck-uhid).")
 else:
-    print("    [+] 50-legion_go.yaml ist bereits korrekt konfiguriert.")
+    print("    [+] 50-legion_go.yaml is already correctly configured.")
 PYEOF
 }
 
 # ------------------------------------------------------------------------------
-# 3. Udev-Regeln und Controller-MCU-Treiber absichern
+# 3. Secure udev rules & controller MCU driver settings
 # ------------------------------------------------------------------------------
 fix_udev_rules() {
-  echo -e "${BLUE}[*] Prüfe Udev-Regeln und MCU-Bypass-Schutz...${NC}"
+  echo -e "${BLUE}[*] Checking udev rules and MCU bypass protection...${NC}"
   cat << 'UDEV_EOF' > "$UDEV_RULES"
 ACTION=="add|change|bind", ATTRS{idVendor}=="17ef", ATTRS{idProduct}=="61e[bcde]", SUBSYSTEM=="hid", DRIVER=="hid-lenovo-go", ATTR{os_mode}="windows", ATTR{left_handle/imu_bypass_enabled}="false", ATTR{right_handle/imu_bypass_enabled}="false", ATTR{touchpad/vibration_enable}="false", GOTO="end"
 UDEV_EOF
   udevadm control --reload-rules 2>/dev/null || true
   udevadm trigger 2>/dev/null || true
 
-  # Live-Hardware in sysfs aktualisieren (falls Controller aktiv)
+  # Update active hardware in sysfs (if controller connected)
   for dev in /sys/bus/hid/drivers/hid-lenovo-go/0003:17EF:61E*.*; do
     if [ -d "$dev" ]; then
       [ -f "$dev/os_mode" ] && echo "windows" > "$dev/os_mode" 2>/dev/null || true
@@ -158,14 +157,14 @@ UDEV_EOF
       [ -d "$dev/left_handle" ] && echo "false" > "$dev/left_handle/imu_bypass_enabled" 2>/dev/null || true
     fi
   done
-  echo -e "${GREEN}    [+] Udev-Regeln aktiv (Verhindert Maus-Lag & Touchpad-Sprünge).${NC}"
+  echo -e "${GREEN}    [+] Udev rules active (prevents mouse lag & touchpad jumping).${NC}"
 }
 
 # ------------------------------------------------------------------------------
-# 4. Steam Gyro-Drift Kalibrierung zurücksetzen (verhindert Nach-Unten-Ziehen)
+# 4. Reset Steam gyro drift calibration (prevents downward view pull)
 # ------------------------------------------------------------------------------
 reset_steam_drift() {
-  echo -e "${BLUE}[*] Bereinige fehlerhafte Steam-Driftwerte...${NC}"
+  echo -e "${BLUE}[*] Resetting erroneous Steam drift values...${NC}"
   for vdf in "$STEAM_CONFIG_DIR"/*12fe*_gyro.vdf; do
     if [ -f "$vdf" ]; then
       cat << 'VDFFIX' > "$vdf"
@@ -179,22 +178,22 @@ reset_steam_drift() {
 }
 VDFFIX
       chown "${USER_NAME}:${USER_NAME}" "$vdf" 2>/dev/null || true
-      echo -e "${GREEN}    [+] Drift in $(basename "$vdf") auf 0.0 zurückgesetzt.${NC}"
+      echo -e "${GREEN}    [+] Drift in $(basename "$vdf") reset to 0.0.${NC}"
     fi
   done
 }
 
 # ------------------------------------------------------------------------------
-# 5. Schneller Fix (Verwendet gesichertes optimiertes Release-Binary)
+# 5. Quick Fix (uses saved optimized release binary)
 # ------------------------------------------------------------------------------
 apply_fast_fix() {
   local auto_mode="$1"
   check_root "$@"
   echo -e "${CYAN}==========================================================${NC}"
-  echo -e "${BOLD}  InputPlumber Gyro-Fix für Lenovo Legion Go (Schnell-Modus)${NC}"
+  echo -e "${BOLD}  InputPlumber Gyro Fix for Lenovo Legion Go (Quick Mode)${NC}"
   echo -e "${CYAN}==========================================================${NC}"
 
-  # Prüfe, welches gepatchte Binary verfügbar ist
+  # Check which patched binary is available
   local source_bin=""
   if [ -f "$PRECOMPILED_BIN" ] && is_binary_patched "$PRECOMPILED_BIN"; then
     source_bin="$PRECOMPILED_BIN"
@@ -203,39 +202,39 @@ apply_fast_fix() {
   fi
 
   if [ -z "$source_bin" ]; then
-    echo -e "${RED}[!] Kein vorkompiliertes gepatchtes Binary gefunden!${NC}"
-    echo -e "${YELLOW}[*] Starte automatischen Rebuild aus dem Quellcode...${NC}"
+    echo -e "${RED}[!] No precompiled patched binary found!${NC}"
+    echo -e "${YELLOW}[*] Starting automatic rebuild from source...${NC}"
     rebuild_from_source
     return $?
   fi
 
-  # 1. Dienst stoppen
-  echo -e "${BLUE}[1/5] Stoppe inputplumber.service...${NC}"
+  # 1. Stop service
+  echo -e "${BLUE}[1/5] Stopping inputplumber.service...${NC}"
   systemctl stop inputplumber.service 2>/dev/null || true
 
-  # 2. Stock-Binary sichern, falls noch nicht gesichert
+  # 2. Backup stock binary if not already backed up
   if [ -f "$TARGET_BIN" ] && ! is_binary_patched "$TARGET_BIN"; then
-    echo -e "${BLUE}[2/5] Sichere Original-Binary nach ${BACKUP_STOCK_BIN}...${NC}"
+    echo -e "${BLUE}[2/5] Backing up original binary to ${BACKUP_STOCK_BIN}...${NC}"
     cp "$TARGET_BIN" "$BACKUP_STOCK_BIN"
   else
-    echo -e "${BLUE}[2/5] Installiere gepatchtes Binary...${NC}"
+    echo -e "${BLUE}[2/5] Installing patched binary...${NC}"
   fi
 
   cp "$source_bin" "$TARGET_BIN"
   chmod 755 "$TARGET_BIN"
-  echo -e "${GREEN}    [+] Gepatchtes 12x-Binary erfolgreich nach ${TARGET_BIN} kopiert.${NC}"
+  echo -e "${GREEN}    [+] Patched binary successfully copied to ${TARGET_BIN}.${NC}"
 
-  # 3. YAML Konfiguration fixen
-  echo -e "${BLUE}[3/5] Prüfe Sensorkonfiguration...${NC}"
+  # 3. Fix YAML configuration
+  echo -e "${BLUE}[3/5] Checking sensor configuration...${NC}"
   fix_yaml_config
 
-  # 4. Udev & Steam Drift
-  echo -e "${BLUE}[4/5] Bereinige Treiber-Einstellungen & Steam-Drift...${NC}"
+  # 4. Udev & Steam drift
+  echo -e "${BLUE}[4/5] Applying driver rules & cleaning Steam drift...${NC}"
   fix_udev_rules
   reset_steam_drift
 
-  # 5. Dienst neu starten
-  echo -e "${BLUE}[5/5] Starte inputplumber.service...${NC}"
+  # 5. Restart service
+  echo -e "${BLUE}[5/5] Restarting inputplumber.service...${NC}"
   systemctl daemon-reload
   systemctl restart inputplumber.service
   sleep 2
@@ -243,114 +242,114 @@ apply_fast_fix() {
   if systemctl is-active --quiet inputplumber.service; then
     echo ""
     echo -e "${GREEN}==========================================================${NC}"
-    echo -e "${BOLD}${GREEN}  ERFOLG: InputPlumber läuft stabil mit Gyro-Fix!        ${NC}"
-    echo -e "${GREEN}  - 12x Beschleunigung & 200 Hz Abtastung aktiv          ${NC}"
-    echo -e "${GREEN}  - accel_3d Erdanziehungsvektor aktiv (Steam erkennt IMU)${NC}"
-    echo -e "${GREEN}  - Native Steam Deck ABXY-Glyphen                       ${NC}"
-    echo -e "${GREEN}  - Touchpad läuft butterweich (kein Mauslag)            ${NC}"
+    echo -e "${BOLD}${GREEN}  SUCCESS: InputPlumber is running with Gyro Fix!        ${NC}"
+    echo -e "${GREEN}  - Native IMU motion streaming & 200 Hz active          ${NC}"
+    echo -e "${GREEN}  - accel_3d gravity vector active (Steam detects IMU)   ${NC}"
+    echo -e "${GREEN}  - Native Steam Deck ABXY glyphs                        ${NC}"
+    echo -e "${GREEN}  - Butter-smooth touchpad tracking (zero mouse lag)     ${NC}"
     echo -e "${GREEN}==========================================================${NC}"
     if [ "$auto_mode" != "--auto-hook" ]; then
-      echo -e "${CYAN}Testen mit:  python3 ~/test-gyro.py${NC}"
+      echo -e "${CYAN}Test live with:  python3 ~/test-gyro.py${NC}"
     fi
   else
-    echo -e "${RED}[!] Fehler beim Starten von inputplumber.service!${NC}"
+    echo -e "${RED}[!] Error starting inputplumber.service!${NC}"
     journalctl -u inputplumber.service -n 25 --no-pager
     return 1
   fi
 }
 
 # ------------------------------------------------------------------------------
-# 6. Eigener Quellcode-Build & Patch (für neue Versionen von InputPlumber)
+# 6. Rebuild & patch from source (for newer versions of InputPlumber)
 # ------------------------------------------------------------------------------
 rebuild_from_source() {
   check_root "$@"
   echo -e "${CYAN}==========================================================${NC}"
-  echo -e "${BOLD}  InputPlumber Quellcode patchen & neu kompilieren       ${NC}"
+  echo -e "${BOLD}  Patch & Recompile InputPlumber Source Code             ${NC}"
   echo -e "${CYAN}==========================================================${NC}"
 
-  # Prüfe Cargo/Rust
+  # Check Cargo/Rust
   if ! command -v cargo &>/dev/null; then
-    echo -e "${YELLOW}[*] Rust/Cargo nicht gefunden, installiere rust...${NC}"
+    echo -e "${YELLOW}[*] Rust/Cargo not found, installing rust...${NC}"
     pacman -S --needed --noconfirm rust
   fi
 
-  # Prüfe Abhängigkeiten
-  echo -e "${BLUE}[*] Prüfe System-Build-Abhängigkeiten...${NC}"
+  # Check dependencies
+  echo -e "${BLUE}[*] Checking system build dependencies...${NC}"
   pacman -S --needed --noconfirm git pkgconf systemd hidapi base-devel
 
-  # Verzeichnis vorbereiten
+  # Prepare directory
   mkdir -p "$SOURCE_DIR"
   if [ ! -d "$SOURCE_DIR/.git" ]; then
-    echo -e "${BLUE}[*] Klone offizielles InputPlumber Repository...${NC}"
+    echo -e "${BLUE}[*] Cloning official InputPlumber repository...${NC}"
     git clone https://github.com/ShadowBlip/InputPlumber.git "$SOURCE_DIR"
     chown -R "${USER_NAME}:${USER_NAME}" "$SOURCE_DIR"
   else
-    echo -e "${BLUE}[*] Aktualisiere InputPlumber Repository...${NC}"
+    echo -e "${BLUE}[*] Updating InputPlumber repository...${NC}"
     sudo -u "${USER_NAME}" git -C "$SOURCE_DIR" fetch --tags
   fi
 
-  # Arbeitskopie säubern
-  echo -e "${BLUE}[*] Setze Quellcode-Status zurück...${NC}"
+  # Clean working tree
+  echo -e "${BLUE}[*] Resetting source code working tree...${NC}"
   sudo -u "${USER_NAME}" git -C "$SOURCE_DIR" reset --hard HEAD
   sudo -u "${USER_NAME}" git -C "$SOURCE_DIR" clean -fd
 
-  # Patch anwenden
+  # Apply patch
   local patch_file="/tmp/inputplumber-legiongo.patch"
   write_embedded_patch "$patch_file"
 
-  echo -e "${BLUE}[*] Wende Legion Go Gyro-Fix Patch an...${NC}"
+  echo -e "${BLUE}[*] Applying Legion Go Gyro Fix patch...${NC}"
   if sudo -u "${USER_NAME}" git -C "$SOURCE_DIR" apply --check "$patch_file" 2>/dev/null; then
     sudo -u "${USER_NAME}" git -C "$SOURCE_DIR" apply "$patch_file"
-    echo -e "${GREEN}    [+] Patch sauber angewendet.${NC}"
+    echo -e "${GREEN}    [+] Patch applied cleanly.${NC}"
   else
-    echo -e "${YELLOW}[!] Direkter Patch schlug fehl, versuche 3-Wege-Merge...${NC}"
+    echo -e "${YELLOW}[!] Direct patch failed, attempting 3-way merge...${NC}"
     if ! sudo -u "${USER_NAME}" git -C "$SOURCE_DIR" apply -3 "$patch_file"; then
-      echo -e "${RED}[-] Quellcode-Patch konnte nicht angewendet werden!${NC}"
+      echo -e "${RED}[-] Source code patch could not be applied!${NC}"
       rm -f "$patch_file"
       return 1
     fi
   fi
   rm -f "$patch_file"
 
-  # Kompilieren mit Cargo Release
-  echo -e "${BLUE}[*] Kompiliere InputPlumber (cargo build --release)...${NC}"
+  # Compile with Cargo Release
+  echo -e "${BLUE}[*] Compiling InputPlumber (cargo build --release)...${NC}"
   sudo -u "${USER_NAME}" bash -c "cd '$SOURCE_DIR' && cargo build --release"
 
   local compiled_bin="$SOURCE_DIR/target/release/inputplumber"
   if [ ! -f "$compiled_bin" ]; then
-    echo -e "${RED}[-] Kompilierung fehlgeschlagen: $compiled_bin nicht gefunden!${NC}"
+    echo -e "${RED}[-] Compilation failed: $compiled_bin not found!${NC}"
     return 1
   fi
 
-  # Dauerhaft sichern
+  # Store precompiled binary
   mkdir -p "$(dirname "$PRECOMPILED_BIN")"
   cp "$compiled_bin" "$PRECOMPILED_BIN"
   chown "${USER_NAME}:${USER_NAME}" "$PRECOMPILED_BIN"
   chmod 755 "$PRECOMPILED_BIN"
-  echo -e "${GREEN}    [+] Neues Release-Binary gesichert unter ${PRECOMPILED_BIN}.${NC}"
+  echo -e "${GREEN}    [+] New release binary saved to ${PRECOMPILED_BIN}.${NC}"
 
-  # Installation durchführen
+  # Complete installation
   apply_fast_fix
 }
 
 # ------------------------------------------------------------------------------
-# 7. Pacman-Hook einrichten (Repariert InputPlumber automatisch nach pacman -Syu)
+# 7. Pacman update hook (Automatically restores fix after pacman -Syu)
 # ------------------------------------------------------------------------------
 install_pacman_hook() {
   check_root "$@"
   echo -e "${CYAN}==========================================================${NC}"
-  echo -e "${BOLD}  Richte automatischen Pacman-Hook ein                   ${NC}"
+  echo -e "${BOLD}  Configure Automated Pacman Update Hook                 ${NC}"
   echo -e "${CYAN}==========================================================${NC}"
 
-  # 1. Symlink für systemweiten Aufruf erstellen
+  # 1. Create symlink for system-wide execution
   ln -sf "/home/${USER_NAME}/fix-inputplumber.sh" "$SYMLINK_BIN"
   chmod 755 "$SYMLINK_BIN"
-  echo -e "${GREEN}[+] Befehl 'fix-inputplumber' systemweit unter ${SYMLINK_BIN} verlinkt.${NC}"
+  echo -e "${GREEN}[+] Command 'fix-inputplumber' linked system-wide at ${SYMLINK_BIN}.${NC}"
 
-  # 2. Hook-Verzeichnis prüfen
+  # 2. Check hook directory
   mkdir -p "$(dirname "$PACMAN_HOOK")"
 
-  # 3. Pacman-Hook-Datei schreiben
+  # 3. Write Pacman hook file
   cat << 'HOOK_EOF' > "$PACMAN_HOOK"
 [Trigger]
 Operation = Upgrade
@@ -365,24 +364,36 @@ Exec = /usr/local/bin/fix-inputplumber --auto-hook
 HOOK_EOF
 
   chmod 644 "$PACMAN_HOOK"
-  echo -e "${GREEN}[+] Pacman-Hook erfolgreich installiert unter:${NC}"
+  echo -e "${GREEN}[+] Pacman hook successfully installed to:${NC}"
   echo -e "    ${PACMAN_HOOK}"
   echo ""
-  echo -e "${GREEN}--> Zukünftige System-Updates (pacman -Syu) werden InputPlumber${NC}"
-  echo -e "${GREEN}    automatisch reparieren, ohne dass du etwas tun musst!${NC}"
+  echo -e "${GREEN}--> Future system updates (pacman -Syu) will automatically${NC}"
+  echo -e "${GREEN}    maintain the fix with zero manual intervention required!${NC}"
   echo -e "${CYAN}==========================================================${NC}"
 }
 
 remove_pacman_hook() {
   check_root "$@"
-  echo -e "${YELLOW}[*] Entferne Pacman-Hook...${NC}"
+  echo -e "${YELLOW}[*] Removing Pacman hook...${NC}"
   rm -f "$PACMAN_HOOK"
   rm -f "$SYMLINK_BIN"
-  echo -e "${GREEN}[+] Hook und Symlink entfernt.${NC}"
+  echo -e "${GREEN}[+] Hook and symlink removed.${NC}"
+}
+
+uninstall_fix() {
+  check_root "$@"
+  if [ -f "/home/${USER_NAME}/uninstall-gyro-fix.sh" ]; then
+    bash "/home/${USER_NAME}/uninstall-gyro-fix.sh"
+  elif [ -f "$(dirname "$0")/uninstall-gyro-fix.sh" ]; then
+    bash "$(dirname "$0")/uninstall-gyro-fix.sh"
+  else
+    echo -e "${RED}[-] uninstall-gyro-fix.sh not found!${NC}"
+    exit 1
+  fi
 }
 
 # ------------------------------------------------------------------------------
-# 8. Status & Diagnose anzeigen
+# 8. Status & Diagnostics Display
 # ------------------------------------------------------------------------------
 show_status() {
   echo -e "${CYAN}==========================================================${NC}"
@@ -392,47 +403,47 @@ show_status() {
   # Binary Status
   echo -n "[1] Binary (/usr/bin/inputplumber): "
   if [ ! -f "$TARGET_BIN" ]; then
-    echo -e "${RED}NICHT GEFUNDEN${NC}"
+    echo -e "${RED}NOT FOUND${NC}"
   elif is_binary_patched "$TARGET_BIN"; then
-    echo -e "${GREEN}GEPATCHT (12x Gyro + SFH Accel Fix aktiv)${NC}"
+    echo -e "${GREEN}PATCHED (Gyro + SFH Accel Fix active)${NC}"
   else
-    echo -e "${RED}UNGEPATCHTES ORIGINAL (vom Paketmanager überschrieben)${NC}"
+    echo -e "${RED}UNPATCHED STOCK (reverted by package manager)${NC}"
   fi
 
   # Backup Binary
-  echo -n "[2] Backup-Binary ($PRECOMPILED_BIN): "
+  echo -n "[2] Backup Binary ($PRECOMPILED_BIN): "
   if [ -f "$PRECOMPILED_BIN" ]; then
     local bsize
     bsize=$(du -h "$PRECOMPILED_BIN" | cut -f1)
-    echo -e "${GREEN}VORHANDEN ($bsize)${NC}"
+    echo -e "${GREEN}PRESENT ($bsize)${NC}"
   else
-    echo -e "${YELLOW}NICHT VORHANDEN${NC}"
+    echo -e "${YELLOW}NOT FOUND${NC}"
   fi
 
-  # Konfiguration
+  # Configuration
   echo -n "[3] Config ($CONFIG_FILE): "
   if [ ! -f "$CONFIG_FILE" ]; then
-    echo -e "${RED}FEHLT${NC}"
+    echo -e "${RED}MISSING${NC}"
   elif grep -q "name: accel_3d" "$CONFIG_FILE" && grep -q "deck-uhid" "$CONFIG_FILE"; then
-    echo -e "${GREEN}KORREKT (accel_3d & deck-uhid konfiguriert)${NC}"
+    echo -e "${GREEN}CORRECT (accel_3d & deck-uhid configured)${NC}"
   else
-    echo -e "${YELLOW}UNVOLLSTÄNDIG (accel_3d oder deck-uhid fehlt)${NC}"
+    echo -e "${YELLOW}INCOMPLETE (accel_3d or deck-uhid missing)${NC}"
   fi
 
   # Udev
-  echo -n "[4] Udev-Regeln ($UDEV_RULES): "
+  echo -n "[4] Udev Rules ($UDEV_RULES): "
   if [ -f "$UDEV_RULES" ]; then
-    echo -e "${GREEN}AKTIV (Mouse-Lag-Schutz eingerichtet)${NC}"
+    echo -e "${GREEN}ACTIVE (Mouse lag prevention enabled)${NC}"
   else
-    echo -e "${YELLOW}NICHT VORHANDEN${NC}"
+    echo -e "${YELLOW}NOT FOUND${NC}"
   fi
 
-  # Pacman-Hook
-  echo -n "[5] Automatischer Pacman-Hook: "
+  # Pacman Hook
+  echo -n "[5] Automated Pacman Hook: "
   if [ -f "$PACMAN_HOOK" ]; then
-    echo -e "${GREEN}AKTIV (repariert automatisch bei pacman -Syu)${NC}"
+    echo -e "${GREEN}ACTIVE (auto-repairs on pacman -Syu)${NC}"
   else
-    echo -e "${YELLOW}NICHT AKTIV (mit 'sudo fix-inputplumber --hook' installierbar)${NC}"
+    echo -e "${YELLOW}INACTIVE (install via 'sudo fix-inputplumber --hook')${NC}"
   fi
 
   # Service Status
@@ -440,25 +451,25 @@ show_status() {
   if systemctl is-active --quiet inputplumber.service; then
     local pid
     pid=$(systemctl show -p MainPID --value inputplumber.service)
-    echo -e "${GREEN}LÄUFT (PID $pid)${NC}"
+    echo -e "${GREEN}RUNNING (PID $pid)${NC}"
   else
-    echo -e "${RED}GESTOPPT / FEHLERHAFT${NC}"
+    echo -e "${RED}STOPPED / FAILED${NC}"
   fi
 
-  # Aktiver virtueller Controller
-  echo -n "[7] Virtueller Steam Controller: "
+  # Active Virtual Controller
+  echo -n "[7] Virtual Steam Controller: "
   local hidraw_dev
   hidraw_dev=$(grep -i -l "28de.*12fe" /sys/class/hidraw/hidraw*/device/uevent 2>/dev/null | sed -n 's|.*/\(hidraw[0-9]\+\)/.*|\1|p' | head -n 1 || true)
   if [ -n "$hidraw_dev" ]; then
-    echo -e "${GREEN}AKTIV (/dev/${hidraw_dev} als Valve Steam Deck)${NC}"
+    echo -e "${GREEN}ACTIVE (/dev/${hidraw_dev} as Valve Steam Deck)${NC}"
   else
-    echo -e "${YELLOW}NICHT GEFUNDEN (wird bei Start initialisiert)${NC}"
+    echo -e "${YELLOW}NOT FOUND (initialized upon client connection)${NC}"
   fi
   echo -e "${CYAN}==========================================================${NC}"
 }
 
 # ------------------------------------------------------------------------------
-# 9. Eingebetteter Git-Patch (vollständiger Patch gegen v0.79.4)
+# 9. Embedded Git Patch (Full patch against upstream)
 # ------------------------------------------------------------------------------
 write_embedded_patch() {
   local out="$1"
@@ -2041,6 +2052,9 @@ case "${1:-}" in
   --remove-hook)
     remove_pacman_hook
     ;;
+  --uninstall|-u)
+    uninstall_fix
+    ;;
   --status|-s)
     show_status
     ;;
@@ -2048,26 +2062,27 @@ case "${1:-}" in
     if [ -f "/home/${USER_NAME}/test-gyro.py" ]; then
       python3 "/home/${USER_NAME}/test-gyro.py"
     else
-      echo -e "${RED}[-] test-gyro.py nicht in /home/${USER_NAME} gefunden!${NC}"
+      echo -e "${RED}[-] test-gyro.py not found in /home/${USER_NAME}!${NC}"
     fi
     ;;
   --auto-hook)
-    # Nicht-interaktiv für Pacman PostTransaction Hook
+    # Non-interactive mode for Pacman PostTransaction Hook
     apply_fast_fix "--auto-hook" >/dev/null 2>&1 || true
-    echo -e "${GREEN}[+] InputPlumber Legion Go Gyro Fix erfolgreich nach Paketupdate angewendet!${NC}"
+    echo -e "${GREEN}[+] InputPlumber Legion Go Gyro Fix successfully applied after package upgrade!${NC}"
     ;;
   --help|-h)
     echo -e "${BOLD}InputPlumber Legion Go Gyro Fix Tool${NC}"
-    echo "Verwendung: sudo bash $0 [OPTION]"
+    echo "Usage: sudo bash $0 [OPTION]"
     echo ""
-    echo "Optionen:"
-    echo "  (keine Option)    Schneller 1-Klick Fix (stellt gepatchtes 12x Binary & Config wieder her)"
-    echo "  --rebuild, -b     Lädt Quellcode herunter, wendet Patch an und kompiliert neu"
-    echo "  --hook            Richtet automatischen Pacman-Hook ein (repariert nach pacman -Syu)"
-    echo "  --remove-hook     Entfernt den automatischen Pacman-Hook"
-    echo "  --status, -s      Zeigt ausführliche Diagnose und Systemstatus an"
-    echo "  --test, -t        Startet den Live-Sensortest"
-    echo "  --help, -h        Zeigt diese Hilfe an"
+    echo "Options:"
+    echo "  (no option)       Quick 1-click fix (restores patched 12x binary & config)"
+    echo "  --rebuild, -b     Downloads source, applies patch, and recompiles"
+    echo "  --hook            Configures automated Pacman hook (auto-fixes on pacman -Syu)"
+    echo "  --remove-hook     Removes automated Pacman hook"
+    echo "  --uninstall, -u   Uninstalls all fixes and restores official stock state"
+    echo "  --status, -s      Displays detailed diagnostics and system status"
+    echo "  --test, -t        Runs live sensor test"
+    echo "  --help, -h        Shows this help menu"
     ;;
   *)
     apply_fast_fix

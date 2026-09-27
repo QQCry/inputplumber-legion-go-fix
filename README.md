@@ -37,9 +37,10 @@ Works seamlessly in both **Desktop Mode** and **Gamescope (Steam Game Mode)** on
 ## 📁 Repository Contents
 
 | `enable-right-gyro-hhd.sh` | Main installer script: installs the patched native-IMU binary, configures udev/yaml, and restarts the service |
+| `uninstall-gyro-fix.sh` | Complete uninstaller: restores stock binary, cleans udev/yaml overrides, resets MCU to defaults |
 | `set-gyro-source.sh` | Helper script to switch active gyro source between tablet and controller on-the-fly |
 | `set-ds5-gyro-speed.sh` | Dynamic real-time speed multiplier adjuster for DualSense gyro emulation |
-| `fix-inputplumber.sh` | Comprehensive build & maintenance tool (source rebuild, pacman hook, health check) |
+| `fix-inputplumber.sh` | Comprehensive build & maintenance tool (source rebuild, pacman hook, uninstaller, health check) |
 | `inputplumber-legiongo.patch` | Clean, standalone Git patch against upstream InputPlumber (`ShadowBlip/InputPlumber`) |
 | `50-legion_go.yaml` | Corrected InputPlumber device configuration profile (`deck-uhid` default) |
 | `99-inputplumber-device-setup.rules` | Udev rules to ensure permissions for `hidraw` controller nodes and eliminate mouse lag |
@@ -99,7 +100,41 @@ To automatically re-apply the patched binary whenever `pacman -Syu` updates `inp
 sudo bash fix-inputplumber.sh --hook
 ```
 
+### 7. Complete Uninstall & Factory Reset
+To cleanly revert all changes, restore the official upstream pacman binary, remove all overrides, and reset MCU firmware:
+```bash
+sudo bash uninstall-gyro-fix.sh
+# or: sudo bash fix-inputplumber.sh --uninstall
+```
+
+See the [Complete Uninstall Protocol](#-complete-uninstall-protocol--factory-reset) section below for technical details.
+
 ---
+
+## 🧹 Complete Uninstall Protocol & Factory Reset
+
+The uninstaller (`uninstall-gyro-fix.sh` / `fix-inputplumber.sh --uninstall`) performs a thorough, 8-step factory reset to ensure the system is completely restored to its original upstream state:
+
+1. **Stop Active Daemon:**
+   * Stops `inputplumber.service` to avoid file locks and race conditions while binaries and configuration files are manipulated.
+2. **Remove Automated Package Hooks:**
+   * Deletes `/etc/pacman.d/hooks/99-inputplumber-fix.hook` and `/usr/local/bin/fix-inputplumber`. This ensures future system upgrades (`pacman -Syu`) stay on standard upstream packages without reapplying patches.
+3. **Restore Official Stock Binary:**
+   * Reinstalls the official, unmodified InputPlumber binary directly from the local Pacman cache (`/var/cache/pacman/pkg/inputplumber-*.pkg.tar.zst`) or backed-up stock binary (`/usr/bin/inputplumber.stock-backup`).
+   * Cleans up all backup binaries in `/usr/bin/`.
+4. **Remove Configuration Overrides:**
+   * Removes `/etc/inputplumber/gyro_source`, `/etc/inputplumber/ds5_gyro_multiplier`, and `/etc/inputplumber/devices.d/50-legion_go.yaml*`.
+   * InputPlumber cleanly reverts to using the default, unmodified profiles in `/usr/share/inputplumber/`.
+5. **Reset Udev Rules & System Policies:**
+   * Removes `/etc/udev/rules.d/99-inputplumber-device-setup.rules` and reloads udev rules to restore standard Linux device permissions.
+6. **Reset Controller MCU & sysfs Hardware State:**
+   * Sends explicit HID commands to stop 16-bit HQ motion streaming and power down the controller IMU.
+   * Restores touchpad bypass (`0x01`), returning the controller MCU to its stock Lenovo firmware state.
+   * Reverts sysfs attributes back to Linux defaults (`os_mode=linux`, `imu_bypass_enabled=true`).
+7. **Clean Systemd Overrides:**
+   * Removes any service overrides in `/etc/systemd/system/inputplumber.service.d/` and executes `systemctl daemon-reload`.
+8. **Package Integrity Verification:**
+   * Starts the clean upstream service and runs `pacman -Qkk inputplumber` to verify that every installed file matches the official Arch/CachyOS package checksums with 100% integrity.
 
 ## 🎮 In-Game Gyro Setup (Steam Input)
 

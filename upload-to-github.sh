@@ -5,32 +5,32 @@ REPO_DIR="/home/qqcry/Projekte/inputplumber-legion-go-fix"
 cd "$REPO_DIR"
 
 echo "=========================================================="
-echo "  InputPlumber Fix auf GitHub hochladen                   "
+echo "  Upload InputPlumber Fix to GitHub                       "
 echo "=========================================================="
 
-# 1. GitHub CLI Login prüfen
+# 1. Check GitHub CLI login
 if ! gh auth status &>/dev/null; then
-  echo "[*] Du bist noch nicht bei GitHub angemeldet."
-  echo "[*] Starte Web-Login (Dein Browser öffnet sich gleich)..."
+  echo "[*] You are not logged in to GitHub yet."
+  echo "[*] Launching web login (browser will open shortly)..."
   echo ""
   gh auth login --web -p https
 fi
 
 echo ""
-echo "[+] Erfolgreich bei GitHub angemeldet!"
+echo "[+] Successfully authenticated with GitHub!"
 echo ""
 
-# 2. Prüfen, ob Remote bereits existiert
+# 2. Check if remote exists
 if git remote get-url origin &>/dev/null; then
-  echo "[*] Bestehendes Remote gefunden. Pushe Änderungen..."
+  echo "[*] Existing remote found. Pushing changes..."
   git push -u origin main
 else
-  echo "[*] Erstelle neues GitHub-Repository 'inputplumber-legion-go-fix'..."
+  echo "[*] Creating new GitHub repository 'inputplumber-legion-go-fix'..."
   gh repo create inputplumber-legion-go-fix --public --source=. --push
 fi
 
 echo ""
 echo "=========================================================="
-echo "[+] Fertig! Das Repository wurde erfolgreich hochgeladen:"
+echo "[+] Done! Repository uploaded successfully:"
 gh repo view --web || true
 echo "=========================================================="

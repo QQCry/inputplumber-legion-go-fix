@@ -104,10 +104,10 @@ index 9e23672..7af1049 100644
  
          Ok(Some(Event::Gyro(gyro_input)))
 diff --git a/src/drivers/lego/go1_driver.rs b/src/drivers/lego/go1_driver.rs
-index bb7ea0d..0856dd7 100644
+index bb7ea0d..212ad6e 100644
 --- a/src/drivers/lego/go1_driver.rs
 +++ b/src/drivers/lego/go1_driver.rs
-@@ -1,19 +1,21 @@
+@@ -1,21 +1,33 @@
  use std::collections::HashSet;
 +use std::time::{Duration, Instant};
  use std::{error::Error, ffi::CString};
@@ -132,8 +132,20 @@ index bb7ea0d..0856dd7 100644
 +    XINPUT_PACKET_SIZE,
  };
  
++/// Full-scale range for the Legion Go gyroscope (±2000 °/s)
++#[allow(dead_code)]
++pub const GYRO_FSR_DPS: f32 = 2000.0;
++/// Sensitivity in DPS per LSB for 16-bit signed integer (-32768..32767) -> 16.384 LSB/dps
++#[allow(dead_code)]
++pub const GYRO_SCALE_DPS: f32 = GYRO_FSR_DPS / 32768.0;
++/// Sensitivity in Radians per second (evdev standard unit)
++#[allow(dead_code)]
++pub const GYRO_SCALE_RAD: f32 = GYRO_SCALE_DPS * (std::f32::consts::PI / 180.0);
++
  pub struct Driver {
-@@ -23,9 +25,71 @@ pub struct Driver {
+     /// HIDRAW device instance
+     hid_device: HidDevice,
+@@ -23,9 +35,79 @@ pub struct Driver {
      filtered_events: HashSet<Capability>,
      /// State for the internal gamepad controller
      state: Option<XInputDataReport>,
@@ -141,6 +153,10 @@ index bb7ea0d..0856dd7 100644
 +    last_emitted_accel: Option<(i16, i16, i16, u8)>,
 +    /// Last emitted gyroscope reading (for resting deadzone gating)
 +    last_emitted_gyro: (i16, i16, i16),
++    /// Static zero-rate calibration offset for right controller (pitch, roll, yaw)
++    right_gyro_offset: (i16, i16, i16),
++    /// Static zero-rate calibration offset for left controller (pitch, roll, yaw)
++    left_gyro_offset: (i16, i16, i16),
 +    /// Timestamp of last sent heartbeat / keep-alive
 +    last_heartbeat: Instant,
 +    /// Timestamp of last received active motion packet
@@ -193,11 +209,15 @@ index bb7ea0d..0856dd7 100644
 +        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x00, 0x04, 0x05, 0x04, 0x01]);
 +        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x00, 0x04, 0x05, 0x03, 0x01]);
 +
-+        // 3. Right Controller: Enable IMU & 16-bit HQ report stream (HHD protocol: EXACT 7 BYTES)
++        // 3. Configure IMU Full-Scale Range (FSR) to ±2000 dps via feature report
++        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x00, 0x04, 0x06, 0x04, 0x00]);
++        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x00, 0x04, 0x06, 0x03, 0x00]);
++
++        // 4. Right Controller: Enable IMU & 16-bit HQ report stream (HHD protocol: EXACT 7 BYTES)
 +        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x06, 0x6A, 0x02, 0x04, 0x01, 0x01]);
 +        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x06, 0x6A, 0x07, 0x04, 0x02, 0x01]);
 +
-+        // 4. Left Controller: Enable IMU & 16-bit HQ report stream (HHD protocol: EXACT 7 BYTES)
++        // 5. Left Controller: Enable IMU & 16-bit HQ report stream (HHD protocol: EXACT 7 BYTES)
 +        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x06, 0x6A, 0x02, 0x03, 0x01, 0x01]);
 +        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x06, 0x6A, 0x07, 0x03, 0x02, 0x01]);
 +    }
@@ -205,7 +225,7 @@ index bb7ea0d..0856dd7 100644
      pub fn new(udev_device: UdevDevice) -> Result<Self, Box<dyn Error + Send + Sync>> {
          let fmtpath = udev_device.devnode().clone();
          let path = CString::new(fmtpath.clone())?;
-@@ -37,34 +101,120 @@ impl Driver {
+@@ -37,34 +119,126 @@ impl Driver {
              || !GO1_PIDS.contains(&info.product_id())
              || info.interface_number() != GP_IID
          {
@@ -244,18 +264,22 @@ index bb7ea0d..0856dd7 100644
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x00, 0x04, 0x05, 0x04, 0x01]);
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x00, 0x04, 0x05, 0x03, 0x01]);
 +
-+        // 3. Right Controller: Enable IMU & 16-bit HQ report stream (HHD protocol)
++        // 3. Configure IMU Full-Scale Range (FSR) to ±2000 dps via feature report
++        Self::send_hid_cmd(&hid_device, &[0x05, 0x00, 0x04, 0x06, 0x04, 0x00]);
++        Self::send_hid_cmd(&hid_device, &[0x05, 0x00, 0x04, 0x06, 0x03, 0x00]);
++
++        // 4. Right Controller: Enable IMU & 16-bit HQ report stream (HHD protocol)
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x6A, 0x02, 0x04, 0x01, 0x01]);
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x6A, 0x07, 0x04, 0x02, 0x01]);
 +
-+        // 4. Left Controller: Enable IMU & 16-bit HQ report stream (HHD protocol)
++        // 5. Left Controller: Enable IMU & 16-bit HQ report stream (HHD protocol)
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x6A, 0x02, 0x03, 0x01, 0x01]);
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x6A, 0x07, 0x03, 0x02, 0x01]);
 +
-+        // 5. Disable Legion button swap (keep standard layout)
++        // 6. Disable Legion button swap (keep standard layout)
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x69, 0x04, 0x01, 0x01, 0x01]);
 +
-+        log::info!("Legion Go: sent Lenovo and HHD IMU activation packets (Left & Right)");
++        log::info!("Legion Go: sent Lenovo and HHD IMU activation packets (Left & Right, FSR ±2000 dps)");
 +
 +        let now = Instant::now();
          Ok(Self {
@@ -264,6 +288,8 @@ index bb7ea0d..0856dd7 100644
              state: None,
 +            last_emitted_accel: None,
 +            last_emitted_gyro: (0, 0, 0),
++            right_gyro_offset: (0, 0, 0),
++            left_gyro_offset: (0, 0, 0),
 +            last_heartbeat: now,
 +            last_motion_packet: now,
          })
@@ -339,7 +365,7 @@ index bb7ea0d..0856dd7 100644
          }
  
          let report_id = buf[0];
-@@ -73,29 +223,27 @@ impl Driver {
+@@ -73,29 +247,27 @@ impl Driver {
          // Configuration event responses happen on the same endpoint. If this data packet isn't
          // specifically xinput data it can crash the driver, so block it.
          if command_id != XINPUT_COMMAND_ID {
@@ -383,7 +409,7 @@ index bb7ea0d..0856dd7 100644
          };
  
          Ok(events)
-@@ -109,10 +257,22 @@ impl Driver {
+@@ -109,10 +281,22 @@ impl Driver {
      ) -> Result<Vec<Event>, Box<dyn Error + Send + Sync>> {
          let input_report = XInputDataReport::unpack(&buf)?;
  
@@ -410,7 +436,7 @@ index bb7ea0d..0856dd7 100644
  
          // Update the state
          let old_state = self.update_xinput_state(input_report);
-@@ -265,6 +425,11 @@ impl Driver {
+@@ -265,6 +449,11 @@ impl Driver {
                      },
                  )));
              }
@@ -422,7 +448,7 @@ index bb7ea0d..0856dd7 100644
              if state.m2 != old_state.m2 {
                  events.push(Event::GamepadButton(GamepadButtonEvent::M2(BinaryInput {
                      pressed: state.m2,
-@@ -297,6 +462,20 @@ impl Driver {
+@@ -297,6 +486,20 @@ impl Driver {
                      },
                  )));
              }
@@ -443,7 +469,7 @@ index bb7ea0d..0856dd7 100644
              if state.thumb_l != old_state.thumb_l {
                  events.push(Event::GamepadButton(GamepadButtonEvent::ThumbL(
                      BinaryInput {
-@@ -361,6 +540,137 @@ impl Driver {
+@@ -361,6 +564,153 @@ impl Driver {
                  log::trace!("Left controller connected state: {:?}", state.l_con_state);
                  log::trace!("Right controller connected state: {:?}", state.r_con_state);
              }
@@ -531,10 +557,14 @@ index bb7ea0d..0856dd7 100644
 +                    || state.left_gyro_y != old_state.left_gyro_y
 +                    || state.left_gyro_z != old_state.left_gyro_z)
 +            {
++                // Anti-drift: subtract static zero-rate calibration offset on i16 level with saturating_sub
++                let raw_x = state.left_gyro_x.saturating_sub(self.left_gyro_offset.0);
++                let raw_y = state.left_gyro_y.saturating_sub(self.left_gyro_offset.1);
++                let raw_z = state.left_gyro_z.saturating_sub(self.left_gyro_offset.2);
 +                events.push(Event::Axis(AxisEvent::LeftGyro(ImuAxisInput {
-+                    pitch: -state.left_gyro_x,
-+                    roll: -state.left_gyro_y,
-+                    yaw: -state.left_gyro_z,
++                    pitch: -raw_x,
++                    roll: -raw_y,
++                    yaw: -raw_z,
 +                })))
 +            }
 +            if !self.filtered_events.contains(&Capability::Gyroscope(Source::Right))
@@ -542,12 +572,18 @@ index bb7ea0d..0856dd7 100644
 +                && !is_gyro_glitch(state.right_gyro_y)
 +                && !is_gyro_glitch(state.right_gyro_z)
 +            {
-+                // Gyro: filter MEMS sensor noise (< 16 LSB ~ 1 deg/s).
++                // Anti-drift: subtract static zero-rate calibration offset on i16 level with saturating_sub
++                // to prevent integer overflow and preserve zero-point calibration at ±2000 dps FSR.
++                let raw_x = state.right_gyro_x.saturating_sub(self.right_gyro_offset.0);
++                let raw_y = state.right_gyro_y.saturating_sub(self.right_gyro_offset.1);
++                let raw_z = state.right_gyro_z.saturating_sub(self.right_gyro_offset.2);
++
++                // Gyro: filter MEMS sensor noise (< 16 LSB ~ 1 deg/s at 16.4 LSB/dps).
 +                // Emit when motion is detected, and emit (0, 0, 0) once when transitioning to rest.
 +                const GYRO_NOISE_DEADZONE: i16 = 16;
-+                let gx = if state.right_gyro_x.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_x };
-+                let gy = if state.right_gyro_y.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_y };
-+                let gz = if state.right_gyro_z.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_z };
++                let gx = if raw_x.abs() < GYRO_NOISE_DEADZONE { 0 } else { raw_x };
++                let gy = if raw_y.abs() < GYRO_NOISE_DEADZONE { 0 } else { raw_y };
++                let gz = if raw_z.abs() < GYRO_NOISE_DEADZONE { 0 } else { raw_z };
 +
 +                let is_moving = gx != 0 || gy != 0 || gz != 0;
 +                let was_moving = self.last_emitted_gyro.0 != 0 || self.last_emitted_gyro.1 != 0 || self.last_emitted_gyro.2 != 0;
@@ -572,17 +608,23 @@ index bb7ea0d..0856dd7 100644
 +                    || state.right_gyro_y != old_state.right_gyro_y
 +                    || state.right_gyro_z != old_state.right_gyro_z)
 +            {
++                let lx = state.left_gyro_x.saturating_sub(self.left_gyro_offset.0);
++                let ly = state.left_gyro_y.saturating_sub(self.left_gyro_offset.1);
++                let lz = state.left_gyro_z.saturating_sub(self.left_gyro_offset.2);
++                let rx = state.right_gyro_x.saturating_sub(self.right_gyro_offset.0);
++                let ry = state.right_gyro_y.saturating_sub(self.right_gyro_offset.1);
++                let rz = state.right_gyro_z.saturating_sub(self.right_gyro_offset.2);
 +                events.push(Event::Axis(AxisEvent::MultiGyro(ImuAxisInput {
-+                    pitch: -(state.left_gyro_x + state.right_gyro_x) / 2,
-+                    roll: (state.left_gyro_y + state.right_gyro_y) / 2,
-+                    yaw: (state.left_gyro_z + state.right_gyro_z) / 2,
++                    pitch: -(lx + rx) / 2,
++                    roll: (ly + ry) / 2,
++                    yaw: (lz + rz) / 2,
 +                })))
 +            }
          }
          events
      }
 diff --git a/src/drivers/lego/go2_driver.rs b/src/drivers/lego/go2_driver.rs
-index 7fa1b91..2d0ff92 100644
+index 7fa1b91..fd9b283 100644
 --- a/src/drivers/lego/go2_driver.rs
 +++ b/src/drivers/lego/go2_driver.rs
 @@ -1,10 +1,10 @@
@@ -597,7 +639,7 @@ index 7fa1b91..2d0ff92 100644
  use crate::input::capability::{Capability, Source};
  use crate::udev::device::UdevDevice;
  
-@@ -14,22 +14,82 @@ use super::{
+@@ -14,22 +14,100 @@ use super::{
          MouseWheelInput, TriggerEvent, TriggerInput,
      },
      hid_report::{GamepadMode, XInputDataReport},
@@ -606,6 +648,16 @@ index 7fa1b91..2d0ff92 100644
      XINPUT_PACKET_SIZE,
  };
  
++/// Full-scale range for the Legion Go gyroscope (±2000 °/s)
++#[allow(dead_code)]
++pub const GYRO_FSR_DPS: f32 = 2000.0;
++/// Sensitivity in DPS per LSB for 16-bit signed integer (-32768..32767) -> 16.384 LSB/dps
++#[allow(dead_code)]
++pub const GYRO_SCALE_DPS: f32 = GYRO_FSR_DPS / 32768.0;
++/// Sensitivity in Radians per second (evdev standard unit)
++#[allow(dead_code)]
++pub const GYRO_SCALE_RAD: f32 = GYRO_SCALE_DPS * (std::f32::consts::PI / 180.0);
++
  pub struct Driver {
      /// HIDRAW device instance
      hid_device: HidDevice,
@@ -619,6 +671,10 @@ index 7fa1b91..2d0ff92 100644
 +    last_emitted_accel: Option<(i16, i16, i16, u8)>,
 +    /// Last emitted gyroscope reading (for resting deadzone gating)
 +    last_emitted_gyro: (i16, i16, i16),
++    /// Static zero-rate calibration offset for right controller (pitch, roll, yaw)
++    right_gyro_offset: (i16, i16, i16),
++    /// Static zero-rate calibration offset for left controller (pitch, roll, yaw)
++    left_gyro_offset: (i16, i16, i16),
 +    /// Timestamp of last sent heartbeat / keep-alive
 +    last_heartbeat: Instant,
 +    /// Timestamp of last received active motion packet
@@ -671,11 +727,15 @@ index 7fa1b91..2d0ff92 100644
 +        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x00, 0x04, 0x05, 0x04, 0x01]);
 +        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x00, 0x04, 0x05, 0x03, 0x01]);
 +
-+        // 3. Right Controller: Enable IMU & 16-bit HQ report stream (HHD protocol: EXACT 7 BYTES)
++        // 3. Configure IMU Full-Scale Range (FSR) to ±2000 dps via feature report
++        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x00, 0x04, 0x06, 0x04, 0x00]);
++        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x00, 0x04, 0x06, 0x03, 0x00]);
++
++        // 4. Right Controller: Enable IMU & 16-bit HQ report stream (HHD protocol: EXACT 7 BYTES)
 +        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x06, 0x6A, 0x02, 0x04, 0x01, 0x01]);
 +        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x06, 0x6A, 0x07, 0x04, 0x02, 0x01]);
 +
-+        // 4. Left Controller: Enable IMU & 16-bit HQ report stream (HHD protocol: EXACT 7 BYTES)
++        // 5. Left Controller: Enable IMU & 16-bit HQ report stream (HHD protocol: EXACT 7 BYTES)
 +        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x06, 0x6A, 0x02, 0x03, 0x01, 0x01]);
 +        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x06, 0x6A, 0x07, 0x03, 0x02, 0x01]);
 +    }
@@ -683,14 +743,14 @@ index 7fa1b91..2d0ff92 100644
      pub fn new(udev_device: UdevDevice) -> Result<Self, Box<dyn Error + Send + Sync>> {
          let fmtpath = udev_device.devnode().clone();
          let path = CString::new(fmtpath.clone())?;
-@@ -41,21 +101,65 @@ impl Driver {
+@@ -41,21 +119,71 @@ impl Driver {
              || !GO2_PIDS.contains(&info.product_id())
              || info.interface_number() != GP_IID
          {
 -            return Err(format!("Device '{fmtpath}' is not a Legion Go S Controller").into());
 +            return Err(format!("Device '{fmtpath}' is not a Legion Go Controller").into());
-         }
- 
++        }
++
 +        log::info!(
 +            "Legion Go: successfully opened controller device on '{}' (PID: {:04x}, interface: {})",
 +            fmtpath,
@@ -712,8 +772,8 @@ index 7fa1b91..2d0ff92 100644
 +                }
 +                curr = parent.parent();
 +            }
-+        }
-+
+         }
+ 
 +        // 1. Disable IMU bypass for Right and Left handles (preserves MCU touchpad filtering, prevents mouse lag)
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x00, 0x04, 0x03, 0x04, 0x00]);
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x00, 0x04, 0x03, 0x03, 0x00]);
@@ -722,18 +782,22 @@ index 7fa1b91..2d0ff92 100644
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x00, 0x04, 0x05, 0x04, 0x01]);
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x00, 0x04, 0x05, 0x03, 0x01]);
 +
-+        // 3. Right Controller: Enable IMU & 16-bit HQ report stream (HHD protocol)
++        // 3. Configure IMU Full-Scale Range (FSR) to ±2000 dps via feature report
++        Self::send_hid_cmd(&hid_device, &[0x05, 0x00, 0x04, 0x06, 0x04, 0x00]);
++        Self::send_hid_cmd(&hid_device, &[0x05, 0x00, 0x04, 0x06, 0x03, 0x00]);
++
++        // 4. Right Controller: Enable IMU & 16-bit HQ report stream (HHD protocol)
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x6A, 0x02, 0x04, 0x01, 0x01]);
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x6A, 0x07, 0x04, 0x02, 0x01]);
 +
-+        // 4. Left Controller: Enable IMU & 16-bit HQ report stream (HHD protocol)
++        // 5. Left Controller: Enable IMU & 16-bit HQ report stream (HHD protocol)
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x6A, 0x02, 0x03, 0x01, 0x01]);
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x6A, 0x07, 0x03, 0x02, 0x01]);
 +
-+        // 5. Disable Legion button swap (keep standard layout)
++        // 6. Disable Legion button swap (keep standard layout)
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x69, 0x04, 0x01, 0x01, 0x01]);
 +
-+        log::info!("Legion Go: sent Lenovo and HHD IMU activation packets (Left & Right)");
++        log::info!("Legion Go: sent Lenovo and HHD IMU activation packets (Left & Right, FSR ±2000 dps)");
 +
 +        let now = Instant::now();
          Ok(Self {
@@ -743,6 +807,8 @@ index 7fa1b91..2d0ff92 100644
              state: None,
 +            last_emitted_accel: None,
 +            last_emitted_gyro: (0, 0, 0),
++            right_gyro_offset: (0, 0, 0),
++            left_gyro_offset: (0, 0, 0),
 +            last_heartbeat: now,
 +            last_motion_packet: now,
          })
@@ -755,7 +821,7 @@ index 7fa1b91..2d0ff92 100644
      pub fn update_filtered_events(&mut self, events: HashSet<Capability>) {
          self.filtered_events = events;
      }
-@@ -63,37 +167,54 @@ impl Driver {
+@@ -63,37 +191,54 @@ impl Driver {
      pub fn get_default_event_filter(
          &self,
      ) -> Result<HashSet<Capability>, Box<dyn Error + Send + Sync>> {
@@ -837,7 +903,7 @@ index 7fa1b91..2d0ff92 100644
          }
  
          let report_id = buf[0];
-@@ -102,29 +223,27 @@ impl Driver {
+@@ -102,29 +247,27 @@ impl Driver {
          // Configuration event responses happen on the same endpoint. If this data packet isn't
          // specifically xinput data it can crash the driver, so block it.
          if command_id != XINPUT_COMMAND_ID {
@@ -881,7 +947,7 @@ index 7fa1b91..2d0ff92 100644
          };
  
          Ok(events)
-@@ -138,10 +257,22 @@ impl Driver {
+@@ -138,10 +281,22 @@ impl Driver {
      ) -> Result<Vec<Event>, Box<dyn Error + Send + Sync>> {
          let input_report = XInputDataReport::unpack(&buf)?;
  
@@ -908,7 +974,7 @@ index 7fa1b91..2d0ff92 100644
  
          // Update the state
          let old_state = self.update_xinput_state(input_report);
-@@ -422,18 +553,50 @@ impl Driver {
+@@ -422,18 +577,50 @@ impl Driver {
                      yaw: state.left_accel_z,
                  })))
              }
@@ -971,7 +1037,7 @@ index 7fa1b91..2d0ff92 100644
              }
              if !self
                  .filtered_events
-@@ -454,28 +617,42 @@ impl Driver {
+@@ -454,28 +641,52 @@ impl Driver {
              if !self
                  .filtered_events
                  .contains(&Capability::Gyroscope(Source::Left))
@@ -982,12 +1048,17 @@ index 7fa1b91..2d0ff92 100644
                      || state.left_gyro_y != old_state.left_gyro_y
                      || state.left_gyro_z != old_state.left_gyro_z)
              {
++                // Anti-drift: subtract static zero-rate calibration offset on i16 level with saturating_sub
++                let raw_x = state.left_gyro_x.saturating_sub(self.left_gyro_offset.0);
++                let raw_y = state.left_gyro_y.saturating_sub(self.left_gyro_offset.1);
++                let raw_z = state.left_gyro_z.saturating_sub(self.left_gyro_offset.2);
                  events.push(Event::Axis(AxisEvent::LeftGyro(ImuAxisInput {
-                     pitch: -state.left_gyro_x,
+-                    pitch: -state.left_gyro_x,
 -                    roll: state.left_gyro_y,
 -                    yaw: state.left_gyro_z,
-+                    roll: -state.left_gyro_y,
-+                    yaw: -state.left_gyro_z,
++                    pitch: -raw_x,
++                    roll: -raw_y,
++                    yaw: -raw_z,
                  })))
              }
 -            if !self
@@ -1006,12 +1077,18 @@ index 7fa1b91..2d0ff92 100644
 -                    roll: state.right_gyro_y,
 -                    yaw: state.right_gyro_z,
 -                })))
-+                // Gyro: filter MEMS sensor noise (< 16 LSB ~ 1 deg/s).
++                // Anti-drift: subtract static zero-rate calibration offset on i16 level with saturating_sub
++                // to prevent integer overflow and preserve zero-point calibration at ±2000 dps FSR.
++                let raw_x = state.right_gyro_x.saturating_sub(self.right_gyro_offset.0);
++                let raw_y = state.right_gyro_y.saturating_sub(self.right_gyro_offset.1);
++                let raw_z = state.right_gyro_z.saturating_sub(self.right_gyro_offset.2);
++
++                // Gyro: filter MEMS sensor noise (< 16 LSB ~ 1 deg/s at 16.4 LSB/dps).
 +                // Emit when motion is detected, and emit (0, 0, 0) once when transitioning to rest.
 +                const GYRO_NOISE_DEADZONE: i16 = 16;
-+                let gx = if state.right_gyro_x.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_x };
-+                let gy = if state.right_gyro_y.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_y };
-+                let gz = if state.right_gyro_z.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_z };
++                let gx = if raw_x.abs() < GYRO_NOISE_DEADZONE { 0 } else { raw_x };
++                let gy = if raw_y.abs() < GYRO_NOISE_DEADZONE { 0 } else { raw_y };
++                let gz = if raw_z.abs() < GYRO_NOISE_DEADZONE { 0 } else { raw_z };
 +
 +                let is_moving = gx != 0 || gy != 0 || gz != 0;
 +                let was_moving = self.last_emitted_gyro.0 != 0 || self.last_emitted_gyro.1 != 0 || self.last_emitted_gyro.2 != 0;
@@ -1027,6 +1104,26 @@ index 7fa1b91..2d0ff92 100644
              }
  
              if !self
+@@ -488,10 +699,16 @@ impl Driver {
+                     || state.right_gyro_y != old_state.right_gyro_y
+                     || state.right_gyro_z != old_state.right_gyro_z)
+             {
++                let lx = state.left_gyro_x.saturating_sub(self.left_gyro_offset.0);
++                let ly = state.left_gyro_y.saturating_sub(self.left_gyro_offset.1);
++                let lz = state.left_gyro_z.saturating_sub(self.left_gyro_offset.2);
++                let rx = state.right_gyro_x.saturating_sub(self.right_gyro_offset.0);
++                let ry = state.right_gyro_y.saturating_sub(self.right_gyro_offset.1);
++                let rz = state.right_gyro_z.saturating_sub(self.right_gyro_offset.2);
+                 events.push(Event::Axis(AxisEvent::MultiGyro(ImuAxisInput {
+-                    pitch: -(state.left_gyro_x + state.right_gyro_x) / 2,
+-                    roll: (state.left_gyro_y + state.right_gyro_y) / 2,
+-                    yaw: (state.left_gyro_z + state.right_gyro_z) / 2,
++                    pitch: -(lx + rx) / 2,
++                    roll: (ly + ry) / 2,
++                    yaw: (lz + rz) / 2,
+                 })))
+             }
+         }
 diff --git a/src/drivers/lego/hid_report.rs b/src/drivers/lego/hid_report.rs
 index 755f258..cd0fe87 100644
 --- a/src/drivers/lego/hid_report.rs
@@ -1123,7 +1220,7 @@ index e11cd6b..7572057 100644
                  };
                  let device = LegionGo2Controller::new(device_info.clone())?;
 diff --git a/src/input/source/hidraw/legion_go.rs b/src/input/source/hidraw/legion_go.rs
-index 37f735b..5a620a4 100644
+index 37f735b..b857324 100644
 --- a/src/input/source/hidraw/legion_go.rs
 +++ b/src/input/source/hidraw/legion_go.rs
 @@ -10,7 +10,7 @@ use crate::{
@@ -1135,7 +1232,24 @@ index 37f735b..5a620a4 100644
          },
          event::{
              native::NativeEvent,
-@@ -163,7 +163,30 @@ impl LegionGoController {
+@@ -22,6 +22,16 @@ use crate::{
+     udev::device::UdevDevice,
+ };
+ 
++/// Full-scale range for the Legion Go gyroscope (±2000 °/s)
++#[allow(dead_code)]
++pub const GYRO_FSR_DPS: f32 = 2000.0;
++/// Sensitivity in DPS per LSB for 16-bit signed integer (-32768..32767) -> 16.384 LSB/dps
++#[allow(dead_code)]
++pub const GYRO_SCALE_DPS: f32 = GYRO_FSR_DPS / 32768.0;
++/// Sensitivity in Radians per second (evdev standard unit)
++#[allow(dead_code)]
++pub const GYRO_SCALE_RAD: f32 = GYRO_SCALE_DPS * (std::f32::consts::PI / 180.0);
++
+ /// Legion Go Controller source device implementation
+ pub struct LegionGoController {
+     driver: Driver,
+@@ -163,7 +173,30 @@ impl LegionGoController {
                      Capability::Touchpad(Touchpad::RightPad(Touch::Motion)),
                      normalize_axis_value(axis),
                  ),
@@ -1167,7 +1281,7 @@ index 37f735b..5a620a4 100644
              },
              event::Event::Trigger(trigg) => match trigg.clone() {
                  event::TriggerEvent::ATriggerL(_) => NativeEvent::new(
-@@ -208,6 +231,17 @@ impl SourceInputDevice for LegionGoController {
+@@ -208,6 +241,17 @@ impl SourceInputDevice for LegionGoController {
          self.driver.update_filtered_events(events);
          Ok(())
      }
@@ -1185,7 +1299,7 @@ index 37f735b..5a620a4 100644
  }
  
  impl SourceOutputDevice for LegionGoController {}
-@@ -248,6 +282,22 @@ fn normalize_axis_value(event: AxisEvent) -> InputValue {
+@@ -248,6 +292,22 @@ fn normalize_axis_value(event: AxisEvent) -> InputValue {
  
              InputValue::Vector2 { x, y }
          }
@@ -1208,7 +1322,7 @@ index 37f735b..5a620a4 100644
          _ => InputValue::None,
      }
  }
-@@ -273,6 +323,12 @@ fn normalize_trigger_value(event: event::TriggerEvent) -> InputValue {
+@@ -273,6 +333,12 @@ fn normalize_trigger_value(event: event::TriggerEvent) -> InputValue {
  }
  /// List of all capabilities that the Legion Go driver implements
  pub const CAPABILITIES: &[Capability] = &[
@@ -1222,10 +1336,27 @@ index 37f735b..5a620a4 100644
      Capability::Gamepad(Gamepad::Axis(GamepadAxis::RightStick)),
      Capability::Gamepad(Gamepad::Button(GamepadButton::DPadDown)),
 diff --git a/src/input/source/hidraw/legion_go2.rs b/src/input/source/hidraw/legion_go2.rs
-index 1ad56bd..d46c2bc 100644
+index 1ad56bd..519ed6d 100644
 --- a/src/input/source/hidraw/legion_go2.rs
 +++ b/src/input/source/hidraw/legion_go2.rs
-@@ -296,15 +296,17 @@ fn normalize_axis_value(event: AxisEvent) -> InputValue {
+@@ -22,6 +22,16 @@ use crate::{
+     udev::device::UdevDevice,
+ };
+ 
++/// Full-scale range for the Legion Go gyroscope (±2000 °/s)
++#[allow(dead_code)]
++pub const GYRO_FSR_DPS: f32 = 2000.0;
++/// Sensitivity in DPS per LSB for 16-bit signed integer (-32768..32767) -> 16.384 LSB/dps
++#[allow(dead_code)]
++pub const GYRO_SCALE_DPS: f32 = GYRO_FSR_DPS / 32768.0;
++/// Sensitivity in Radians per second (evdev standard unit)
++#[allow(dead_code)]
++pub const GYRO_SCALE_RAD: f32 = GYRO_SCALE_DPS * (std::f32::consts::PI / 180.0);
++
+ /// Legion Go Controller source device implementation
+ pub struct LegionGo2Controller {
+     driver: Driver,
+@@ -296,15 +306,17 @@ fn normalize_axis_value(event: AxisEvent) -> InputValue {
          AxisEvent::LeftAccel(value)
          | AxisEvent::RightAccel(value)
          | AxisEvent::MultiAccel(value) => InputValue::Vector3 {

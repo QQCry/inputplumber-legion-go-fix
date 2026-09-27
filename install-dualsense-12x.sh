@@ -2,41 +2,41 @@
 set -e
 
 if [ "$EUID" -ne 0 ]; then
-  echo "[-] Bitte mit sudo ausführen: sudo bash $0"
+  echo "[-] Please run with sudo: sudo bash $0"
   exit 1
 fi
 
 echo "=========================================================="
-echo "  Installiere InputPlumber mit DualSense 12x Gyro Support"
+echo "  Install InputPlumber with DualSense 12x Gyro Support    "
 echo "=========================================================="
 
 SOURCE_BIN="/home/qqcry/.local/bin/inputplumber-patched-dualsense-12x"
 
 if [ ! -f "$SOURCE_BIN" ]; then
-  echo "[-] Kompiliertes Binary nicht gefunden unter $SOURCE_BIN!"
+  echo "[-] Compiled binary not found at $SOURCE_BIN!"
   exit 1
 fi
 
-echo "[1/3] Stoppe inputplumber.service..."
+echo "[1/3] Stopping inputplumber.service..."
 systemctl stop inputplumber.service || true
 
-echo "[2/3] Installiere neues Binary nach /usr/bin/inputplumber..."
+echo "[2/3] Installing new binary to /usr/bin/inputplumber..."
 if [ -f /usr/bin/inputplumber ] && [ ! -f /usr/bin/inputplumber.orig-ds5 ]; then
   cp /usr/bin/inputplumber /usr/bin/inputplumber.orig-ds5
-  echo "      Backup erstellt unter /usr/bin/inputplumber.orig-ds5"
+  echo "      Backup created at /usr/bin/inputplumber.orig-ds5"
 fi
 cp "$SOURCE_BIN" /usr/bin/inputplumber
 chmod 755 /usr/bin/inputplumber
 cp /home/qqcry/fix-inputplumber.sh /usr/local/bin/fix-inputplumber 2>/dev/null || true
 
-# Erstelle gyro_source Konfigurationsdatei falls noch nicht existent
+# Create gyro_source config file if not existing
 mkdir -p /etc/inputplumber
 if [ ! -f /etc/inputplumber/gyro_source ]; then
   echo "tablet" > /etc/inputplumber/gyro_source
 fi
 chmod 666 /etc/inputplumber/gyro_source 2>/dev/null || true
 
-echo "[3/3] Starte inputplumber.service neu..."
+echo "[3/3] Restarting inputplumber.service..."
 systemctl daemon-reload
 systemctl restart inputplumber.service
 
@@ -44,21 +44,21 @@ sleep 2
 if systemctl is-active --quiet inputplumber.service; then
   echo ""
   echo "=========================================================="
-  echo "[+] ERFOLG: InputPlumber ist aktualisiert & aktiv!"
-  echo "    - Feste DualSense MAC-Adresse: Steam verliert keine Gyro-Kalibrierung mehr!"
-  echo "    - Standard-Controller bleibt Steam Deck (deck-uhid) beim Booten"
-  echo "    - Dynamischer Gyro-Umschalter aktiv (Tablet <-> Controller)"
+  echo "[+] SUCCESS: InputPlumber is updated & running!"
+  echo "    - Static DualSense MAC address: Steam never loses calibration!"
+  echo "    - Default target remains Steam Deck (deck-uhid) on boot"
+  echo "    - Dynamic gyro switch active (Tablet <-> Controller)"
   echo "=========================================================="
-  echo "Sensor umschalten (jederzeit ohne Neustart möglich):"
-  echo "  ~/set-gyro-source.sh controller   -> Rechter Controller-Sensor (angedockt)"
-  echo "  ~/set-gyro-source.sh tablet       -> Interner Tablet-Sensor (Standard)"
-  echo "  ~/set-gyro-source.sh status       -> Aktuellen Status anzeigen"
+  echo "Switch sensor anytime without restarting:"
+  echo "  ~/set-gyro-source.sh controller   -> Right controller sensor (docked)"
+  echo "  ~/set-gyro-source.sh tablet       -> Internal tablet sensor (default)"
+  echo "  ~/set-gyro-source.sh status       -> Show current active sensor"
   echo "=========================================================="
-  echo "Du kannst die Bewegungssensoren jetzt live testen mit:"
+  echo "You can test motion sensors in real-time with:"
   echo "  python3 ~/test-dualsense-gyro.py"
   echo "=========================================================="
 else
-  echo "[-] Fehler beim Starten von inputplumber.service!"
+  echo "[-] Failed to start inputplumber.service!"
   journalctl -u inputplumber.service -n 20 --no-pager
   exit 1
 fi
