@@ -46,6 +46,10 @@ Works seamlessly in both **Desktop Mode** and **Gamescope (Steam Game Mode)** on
 | `99-inputplumber-device-setup.rules` | Udev rules to ensure permissions for `hidraw` controller nodes and eliminate mouse lag |
 | `test-gyro.py` | Real-time terminal diagnostic tool verifying Pitch, Yaw, Roll, and 1G Accel |
 | `test-dualsense-gyro.py` | Real-time terminal diagnostic tool for DualSense IMU data |
+| `set-gyro-sensitivity.sh` | Adjust tablet gyro sensitivity multiplier directly in device configuration |
+| `switch-to-hhd.sh` | Quick rollback helper to stop InputPlumber and reactivate Handheld Daemon (HHD) |
+| `switch-to-inputplumber.sh` | Switch from HHD to InputPlumber with Steam Deck emulation |
+| `fix-mouse-lag.sh` | Reset touchpad optical sensor and controller MCU bypass settings |
 | `INPUTPLUMBER_GYRO_FIX.md` | In-depth technical architecture and protocol documentation |
 
 ---
