@@ -54,7 +54,7 @@ Works seamlessly in both **Desktop Mode** and **Gamescope (Steam Game Mode)** on
 
 ### 1. Apply Fix / Install Patched Binary
 ```bash
-sudo bash enable-right-gyro-hhd.sh
+sudo bash ~/fix-inputplumber.sh
 ```
 This script installs the patched InputPlumber binary with native Right Joy-Con IMU support, configures `50-legion_go.yaml`, configures udev rules, sends MCU activation packets, and restarts `inputplumber.service`.
 
@@ -90,9 +90,6 @@ python3 test-dualsense-gyro.py
 
 ### 5. Build & Patch Fresh from Upstream Source
 To compile directly from source using the included patch:
-```bash
-sudo bash ~/fix-inputplumber.sh
-```
 
 ```bash
 sudo bash fix-inputplumber.sh --rebuild
