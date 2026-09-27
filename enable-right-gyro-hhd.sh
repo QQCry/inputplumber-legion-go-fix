@@ -17,6 +17,9 @@ systemctl stop inputplumber.service 2>/dev/null || true
 # 2. Install new binary
 echo "[2/6] Installing patched binary for right controller..."
 NEW_BIN="/home/qqcry/.local/bin/inputplumber-right-controller-12x"
+if [ ! -f "$NEW_BIN" ] && [ -f "/home/qqcry/.local/bin/inputplumber-patched-12x" ]; then
+  NEW_BIN="/home/qqcry/.local/bin/inputplumber-patched-12x"
+fi
 if [ ! -f "$NEW_BIN" ]; then
   echo "[-] Error: $NEW_BIN not found!"
   exit 1
@@ -26,6 +29,14 @@ echo "[+] Patched binary successfully installed to /usr/bin/inputplumber."
 
 # 3. Update configuration: claim tablet IMU in CompositeDevice0 but mute events to prioritize Joy-Con IMU
 echo "[3/6] Configuring /etc/inputplumber/devices.d/50-legion_go.yaml..."
+mkdir -p /etc/inputplumber/devices.d
+if [ ! -f /etc/inputplumber/devices.d/50-legion_go.yaml ]; then
+  if [ -f /usr/share/inputplumber/devices/50-legion_go.yaml ]; then
+    cp /usr/share/inputplumber/devices/50-legion_go.yaml /etc/inputplumber/devices.d/50-legion_go.yaml
+  elif [ -f "$(dirname "$0")/50-legion_go.yaml" ]; then
+    cp "$(dirname "$0")/50-legion_go.yaml" /etc/inputplumber/devices.d/50-legion_go.yaml
+  fi
+fi
 python3 -c '
 import re
 
