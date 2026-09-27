@@ -580,7 +580,7 @@ index 9e23672..7af1049 100644
  
          Ok(Some(Event::Gyro(gyro_input)))
 diff --git a/src/drivers/lego/go1_driver.rs b/src/drivers/lego/go1_driver.rs
-index bb7ea0d..0856dd7 100644
+index bb7ea0d..8586484 100644
 --- a/src/drivers/lego/go1_driver.rs
 +++ b/src/drivers/lego/go1_driver.rs
 @@ -1,19 +1,21 @@
@@ -937,10 +937,10 @@ index bb7ea0d..0856dd7 100644
 +                })))
 +            }
 +            // HHD hardware glitch filter: controller firmware has a bug where it randomly emits
-+            // 254 or 255 (or -254 / -255) on gyro axes as corrupt glitch packets.
++            // 254..=256 (or -254..=-256) on gyro axes as corrupt glitch packets.
 +            let is_gyro_glitch = |v: i16| -> bool {
 +                let a = v.abs();
-+                a == 254 || a == 255
++                a >= 254 && a <= 256
 +            };
 +
 +            // Accel: emit on initial packet, when change exceeds noise threshold (25 LSB ~ 0.05G),
@@ -1018,9 +1018,9 @@ index bb7ea0d..0856dd7 100644
 +                && !is_gyro_glitch(state.right_gyro_y)
 +                && !is_gyro_glitch(state.right_gyro_z)
 +            {
-+                // Gyro: filter MEMS sensor noise (< 16 LSB ~ 1 deg/s).
++                // Gyro: filter MEMS sensor noise (< 24 LSB ~ 1.4 deg/s).
 +                // Emit when motion is detected, and emit (0, 0, 0) once when transitioning to rest.
-+                const GYRO_NOISE_DEADZONE: i16 = 16;
++                const GYRO_NOISE_DEADZONE: i16 = 24;
 +                let gx = if state.right_gyro_x.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_x };
 +                let gy = if state.right_gyro_y.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_y };
 +                let gz = if state.right_gyro_z.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_z };
@@ -1058,7 +1058,7 @@ index bb7ea0d..0856dd7 100644
          events
      }
 diff --git a/src/drivers/lego/go2_driver.rs b/src/drivers/lego/go2_driver.rs
-index 7fa1b91..2d0ff92 100644
+index 7fa1b91..fa8ba2c 100644
 --- a/src/drivers/lego/go2_driver.rs
 +++ b/src/drivers/lego/go2_driver.rs
 @@ -1,10 +1,10 @@
@@ -1401,10 +1401,10 @@ index 7fa1b91..2d0ff92 100644
 -                    yaw: state.right_accel_z,
 -                })))
 +            // HHD hardware glitch filter: controller firmware has a bug where it randomly emits
-+            // 254 or 255 (or -254 / -255) on gyro axes as corrupt glitch packets.
++            // 254..=256 (or -254..=-256) on gyro axes as corrupt glitch packets.
 +            let is_gyro_glitch = |v: i16| -> bool {
 +                let a = v.abs();
-+                a == 254 || a == 255
++                a >= 254 && a <= 256
 +            };
 +
 +            // Accel: emit on initial packet, when change exceeds noise threshold (25 LSB ~ 0.05G),
@@ -1482,9 +1482,9 @@ index 7fa1b91..2d0ff92 100644
 -                    roll: state.right_gyro_y,
 -                    yaw: state.right_gyro_z,
 -                })))
-+                // Gyro: filter MEMS sensor noise (< 16 LSB ~ 1 deg/s).
++                // Gyro: filter MEMS sensor noise (< 24 LSB ~ 1.4 deg/s).
 +                // Emit when motion is detected, and emit (0, 0, 0) once when transitioning to rest.
-+                const GYRO_NOISE_DEADZONE: i16 = 16;
++                const GYRO_NOISE_DEADZONE: i16 = 24;
 +                let gx = if state.right_gyro_x.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_x };
 +                let gy = if state.right_gyro_y.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_y };
 +                let gz = if state.right_gyro_z.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_z };
@@ -2035,7 +2035,6 @@ index 786f205..f606ca7 100644
              Capability::Gamepad(Gamepad::Trigger(GamepadTrigger::LeftStickForce)),
              Capability::Gamepad(Gamepad::Trigger(GamepadTrigger::LeftTouchpadForce)),
              Capability::Gamepad(Gamepad::Trigger(GamepadTrigger::LeftTrigger)),
-
 PATCH_EOF
 }
 
