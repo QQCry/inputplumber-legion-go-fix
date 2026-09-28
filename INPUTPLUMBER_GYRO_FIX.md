@@ -31,7 +31,7 @@ In the original upstream InputPlumber codebase, IMU data from the Legion Go Joy-
   2. **HHD Streaming & Wakeup Commands (EXACTLY 7 BYTES, UNPADDED!):**
      * **Important:** The Lenovo firmware completely discards `0x6a` commands if they are padded to 64 bytes! They must be sent with exact length (7 bytes):
      * Enable IMU Sensor: `05 06 6a 02 04 01 01` (Right) and `05 06 6a 02 03 01 01` (Left).
-     * Enable 16-Bit HQ Stream: `05 06 6a 07 04 02 01` (Right) and `05 06 6a 07 03 02 01` (Left).
+     * Enable 16-Bit Stream: `05 06 6a 07 04 02 01` (Right) and `05 06 6a 07 03 02 01` (Left).
      * Disable Legion Swap: `05 06 69 04 01 01 01`.
 
 * **Periodic Heartbeat & Stream-Silence Re-Arm:**
@@ -204,10 +204,10 @@ To eliminate clipping during rapid turns, FSR is set to **`±2000 dps`** (`°/s`
 
 | Motion Source / Interface | Polling Rate (Hz) | Packet Interval | Technical Notes |
 | :--- | :--- | :--- | :--- |
-| **Native Right Controller (Default)** | **~315 – 375 Hz** | **~2.7 – 3.2 ms** | Hardware USB endpoint (`EP 2 IN`) runs with `bInterval = 2` (2 ms grid). The 16-bit HQ stream (`0x6a`) delivers unthrottled packets directly to InputPlumber. |
+| **Native Right Controller (Default)** | **~315 – 375 Hz** | **~2.7 – 3.2 ms** | Hardware USB endpoint (`EP 2 IN`) runs with `bInterval = 2` (2 ms grid). The 16-bit stream (`0x6a`) delivers unthrottled packets directly to InputPlumber. |
 | **Virtual Steam Deck Controller (`deck-uhid`)** | **~315 – 375 Hz** | **~2.7 – 3.2 ms** | Fully event-driven; InputPlumber immediately forwards every incoming IMU report to Steam and Gamescope without delay. |
 | **Internal Tablet Sensor (AMD SFH IIO)** | **200 Hz** | **5.0 ms** | Fixed hardware/driver sampling rate of AMD Sensor Fusion Hub in the Linux kernel (`gyro_3d` / `accel_3d`). |
-| *Lenovo Stock Standard (without HQ IMU)* | *40 – 100 Hz* | *10 – 25 ms* | Default Lenovo XInput report prior to the fix ran at only 40–100 Hz. |
+| *Lenovo Stock Standard (without IMU)* | *40 – 100 Hz* | *10 – 25 ms* | Default Lenovo XInput report prior to the fix ran at only 40–100 Hz. |
 
 ---
 
@@ -233,7 +233,7 @@ sudo bash ~/uninstall-gyro-fix.sh
 5. **Reset Udev Rules & System Policies:**  
    Removes `/etc/udev/rules.d/99-inputplumber-device-setup.rules` and reloads system udev rules.
 6. **Reset Controller MCU & sysfs Hardware State:**  
-   - Sends explicit HID commands to stop 16-bit HQ motion streaming and disable MCU IMU power.
+   - Sends explicit HID commands to stop 16-bit motion streaming and disable MCU IMU power.
    - Restores optical touchpad bypass (`bypass=0x01`).
    - Sets sysfs hardware attributes back to Linux stock (`os_mode=linux`, `imu_bypass_enabled=true`).
 7. **Clean Systemd Overrides:**  
