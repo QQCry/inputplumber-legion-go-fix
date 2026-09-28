@@ -3,14 +3,14 @@
 This document details the implementation, firmware architecture, protocol quirks, and configuration of the gyroscope and accelerometer in InputPlumber for the Lenovo Legion Go (Model 1 `83E1` & Model 2).
 
 InputPlumber supports **two independent motion sources** on the Legion Go:
-1. **Native Right Controller Sensor:** Directly accessed via the HIDRAW interface of the controller MCU (reverse-engineered from Handheld Daemon / HHD) – works both **wirelessly detached** and **firmly attached** in handheld mode!
+1. **Native Right Controller Sensor:** Directly accessed via the HIDRAW interface of the controller MCU – works both **wirelessly detached** and **firmly attached** in handheld mode!
 2. **Internal Tablet / Display Sensor:** Accessed via the AMD Sensor Fusion Hub (`iio:device0` / `iio:device1`).
 
 ---
 
 ## 1. Native Right Controller Sensor (HIDRAW Driver)
 
-In the original upstream InputPlumber codebase, IMU data from the Legion Go Joy-Cons was ignored or blacklisted by default (Upstream Issue #678 / PR #677). The low-level logic from the *Handheld Daemon (HHD)* was ported to Rust and integrated directly into InputPlumber's `lego` driver subsystem ([`go1_driver.rs`](file:///home/qqcry/Projekte/InputPlumber/src/drivers/lego/go1_driver.rs), [`go2_driver.rs`](file:///home/qqcry/Projekte/InputPlumber/src/drivers/lego/go2_driver.rs), and [`hidraw/legion_go2.rs`](file:///home/qqcry/Projekte/InputPlumber/src/input/source/hidraw/legion_go2.rs)).
+In the original upstream InputPlumber codebase, IMU data from the Legion Go Joy-Cons was ignored or blacklisted by default (Upstream Issue #678 / PR #677). Low-level HIDRAW driver support was implemented in Rust and integrated directly into InputPlumber's `lego` driver subsystem ([`go1_driver.rs`](file:///home/qqcry/Projekte/InputPlumber/src/drivers/lego/go1_driver.rs), [`go2_driver.rs`](file:///home/qqcry/Projekte/InputPlumber/src/drivers/lego/go2_driver.rs), and [`hidraw/legion_go2.rs`](file:///home/qqcry/Projekte/InputPlumber/src/input/source/hidraw/legion_go2.rs)).
 
 ### Architecture & Protocol Details:
 
@@ -28,7 +28,7 @@ In the original upstream InputPlumber codebase, IMU data from the Legion Go Joy-
   1. **Lenovo Feature Reports (Padded to 64 Bytes):**
      * Disable Touchpad Bypass: `05 00 04 03 04 00` (Right) and `05 00 04 03 03 00` (Left) $\rightarrow$ Prevents mouse lag and cursor stutter.
      * Enable IMU Power: `05 00 04 05 04 01` (Right) and `05 00 04 05 03 01` (Left).
-  2. **HHD Streaming & Wakeup Commands (EXACTLY 7 BYTES, UNPADDED!):**
+  2. **Raw MCU Streaming & Wakeup Commands (EXACTLY 7 BYTES, UNPADDED!):**
      * **Important:** The Lenovo firmware completely discards `0x6a` commands if they are padded to 64 bytes! They must be sent with exact length (7 bytes):
      * Enable IMU Sensor: `05 06 6a 02 04 01 01` (Right) and `05 06 6a 02 03 01 01` (Left).
      * Enable 16-Bit Stream: `05 06 6a 07 04 02 01` (Right) and `05 06 6a 07 03 02 01` (Left).
@@ -121,7 +121,7 @@ In InputPlumber's virtual Steam Deck emulation layer (`steam_deck_uhid.rs`), an 
 
 ## 4. Helper Scripts & Diagnostics
 
-* **`sudo bash ~/enable-right-gyro-hhd.sh`:**  
+* **`sudo bash ~/fix-inputplumber.sh`:**  
   Installs the patched binary to `/usr/bin/inputplumber`, configures udev rules, sends unpadded 7-byte MCU activation packets, and restarts the service.
 * **`python3 ~/test-gyro.py`:**  
   Reads real-time packets from the virtual Steam Deck controller (`28de:12fe`) and visualizes gravity (`Accel`), angular rate (`Gyro`), and direction in the terminal:

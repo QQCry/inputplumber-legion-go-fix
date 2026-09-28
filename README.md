@@ -2,7 +2,7 @@
 
 Complete solution, native HID driver patch, configuration profiles, and auto-repair scripts to enable fully functional, smooth 200 Hz gyroscope and motion aiming on the **Lenovo Legion Go** using **InputPlumber**, with persistent **DualSense (DS5)** and **Steam Deck (`deck-uhid`)** support.
 
-Includes a native reverse-engineered HID driver port (from HHD) to read the **detachable Right Controller IMU** directly via `hidraw`, bypassing tablet-only limitations.
+Includes a native reverse-engineered HID driver to read the **detachable Right Controller IMU** directly via `hidraw`, bypassing tablet-only limitations.
 
 Works seamlessly in both **Desktop Mode** and **Gamescope (Steam Game Mode)** on Arch Linux, CachyOS, Bazzite, ChimeraOS, and other Linux distributions.
 
@@ -10,7 +10,7 @@ Works seamlessly in both **Desktop Mode** and **Gamescope (Steam Game Mode)** on
 
 ## 🎯 What This Fix Solves
 
-1. **Native Right-Controller IMU Driver (Ported from HHD):**
+1. **Native Right-Controller IMU Driver:**
    * **Cause:** Upstream InputPlumber only supported the internal tablet IMU via Linux IIO/AMD SFH. The detachable right Joy-Con sensor remained dark due to Lenovo's proprietary HID protocol.
    * **Fix:** Implemented native HID handling in `go1_driver.rs` and `go2_driver.rs`. It communicates via `hidraw` on Interface 2, sending raw 7-byte initialization handshakes (`0x6A 0x02` / `0x07`) to unlock high-rate 16-bit motion streaming from the controller MCU.
 2. **Dead/Disabled Gyro in Steam Input (Missing Gravitational Vector):**
@@ -21,7 +21,7 @@ Works seamlessly in both **Desktop Mode** and **Gamescope (Steam Game Mode)** on
    * **Fix:** Reconnect handling detects controller state changes, re-executes the unpadded 7-byte wake-up handshake, and cleanly rebinds the polling thread without crashing the daemon.
 4. **Firmware Glitch Filter & Linear Calibration:**
    * **Cause:** Lenovo's firmware intermittently transmits spurious `0x00FE` / `0x00FF` gyro packets, causing micro-stutters and sudden view snaps. Furthermore, excessive artificial multipliers caused immediate 16-bit clipping in Steam.
-   * **Fix:** Implemented an exact byte glitch filter (dropping invalid packets) and normalized scaling to a clean 1:1 ratio matching the HHD reference, allowing native Steam Input sliders to function properly.
+   * **Fix:** Implemented an exact byte glitch filter (dropping invalid packets) and normalized scaling to a clean 1:1 ratio matching the physical controller angular velocity, allowing native Steam Input sliders to function properly.
 5. **DualSense MAC Persistence (Lost Gyro Profiles on Reboot):**
    * **Cause:** Upstream `src/input/target/dualsense.rs` generated a random Bluetooth MAC address on every virtual device creation. Steam treated every reconnection as a brand new controller, resetting Gyro to "Disabled" and wiping layouts.
    * **Fix:** Hardcoded persistent MAC addresses (`e8:47:3a:d6:e7:74` for Normal, `e8:47:3a:d6:e7:ee` for Edge). Steam permanently remembers calibrations and per-game mappings.
@@ -44,20 +44,17 @@ Works seamlessly in both **Desktop Mode** and **Gamescope (Steam Game Mode)** on
 
 | File | Description |
 | :--- | :--- |
-| `enable-right-gyro-hhd.sh` | Main installer script: installs the patched native-IMU binary, configures udev/yaml, and restarts the service |
+| `fix-inputplumber.sh` | Comprehensive build & maintenance tool (installer, source rebuild, pacman hook, uninstaller, health check) |
 | `uninstall-gyro-fix.sh` | Complete uninstaller: restores stock binary, cleans udev/yaml overrides, resets MCU to defaults |
 | `set-controller-gyro-speed.sh` | Live real-time speed multiplier tuner for Right Joy-Con gyro (`/etc/inputplumber/controller_gyro_speed`) |
 | `set-gyro-source.sh` | Helper script to switch active gyro source between tablet and controller on-the-fly |
 | `set-ds5-gyro-speed.sh` | Dynamic real-time speed multiplier adjuster for DualSense gyro emulation |
-| `fix-inputplumber.sh` | Comprehensive build & maintenance tool (source rebuild, pacman hook, uninstaller, health check) |
 | `inputplumber-legiongo.patch` | Clean, standalone Git patch against upstream InputPlumber (`ShadowBlip/InputPlumber`) |
 | `50-legion_go.yaml` | Corrected InputPlumber device configuration profile (`deck-uhid` default) |
 | `99-inputplumber-device-setup.rules` | Udev rules to ensure permissions for `hidraw` controller nodes and eliminate mouse lag |
 | `test-gyro.py` | Real-time terminal diagnostic tool verifying Pitch, Yaw, Roll, and 1G Accel |
 | `test-dualsense-gyro.py` | Real-time terminal diagnostic tool for DualSense IMU data |
 | `set-gyro-sensitivity.sh` | Adjust tablet gyro sensitivity multiplier directly in device configuration |
-| `switch-to-hhd.sh` | Quick rollback helper to stop InputPlumber and reactivate Handheld Daemon (HHD) |
-| `switch-to-inputplumber.sh` | Switch from HHD to InputPlumber with Steam Deck emulation |
 | `fix-mouse-lag.sh` | Reset touchpad optical sensor and controller MCU bypass settings |
 | `INPUTPLUMBER_GYRO_FIX.md` | In-depth technical architecture and protocol documentation |
 | `INPUTPLUMBER_PR612_FEEDBACK.md` | Validation report and upstream feedback templates for PR #612 |

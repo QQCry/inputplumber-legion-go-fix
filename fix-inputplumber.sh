@@ -580,7 +580,7 @@ index 9e23672..7af1049 100644
  
          Ok(Some(Event::Gyro(gyro_input)))
 diff --git a/src/drivers/lego/go1_driver.rs b/src/drivers/lego/go1_driver.rs
-index bb7ea0d..6675bb5 100644
+index bb7ea0d..29642e1 100644
 --- a/src/drivers/lego/go1_driver.rs
 +++ b/src/drivers/lego/go1_driver.rs
 @@ -1,19 +1,21 @@
@@ -641,11 +641,11 @@ index bb7ea0d..6675bb5 100644
  
  impl Driver {
 +    /// Send an output report to the Legion Go controller interface.
-+    /// Commands 0x6a and 0x69 (HHD protocol) MUST be sent as exact unpadded bytes (7 bytes).
++    /// Commands 0x6a and 0x69 (raw MCU protocol) MUST be sent as exact unpadded bytes (7 bytes).
 +    /// Initial Lenovo feature commands (0x05 0x00 0x04 ...) are padded to 64 bytes.
 +    pub fn send_hid_cmd(dev: &HidDevice, cmd: &[u8]) {
-+        let is_hhd_cmd = cmd.len() >= 3 && (cmd[2] == 0x6A || cmd[2] == 0x69);
-+        if is_hhd_cmd {
++        let is_unpadded_cmd = cmd.len() >= 3 && (cmd[2] == 0x6A || cmd[2] == 0x69);
++        if is_unpadded_cmd {
 +            match dev.write(cmd) {
 +                Ok(n) => log::info!("Legion Go: sent unpadded HID cmd {:02x?} ({} bytes)", cmd, n),
 +                Err(e) => log::warn!("Legion Go: error sending unpadded HID cmd {:02x?}: {}", cmd, e),
@@ -664,8 +664,8 @@ index bb7ea0d..6675bb5 100644
 +
 +    /// Send non-blocking command: 0x6a commands as exact unpadded 7 bytes, Lenovo reports as 64 bytes padded
 +    fn send_heartbeat_cmd(dev: &HidDevice, cmd: &[u8]) {
-+        let is_hhd_cmd = cmd.len() >= 3 && (cmd[2] == 0x6A || cmd[2] == 0x69);
-+        if is_hhd_cmd {
++        let is_unpadded_cmd = cmd.len() >= 3 && (cmd[2] == 0x6A || cmd[2] == 0x69);
++        if is_unpadded_cmd {
 +            let _ = dev.write(cmd);
 +        } else {
 +            let mut buf = [0u8; 64];
@@ -685,11 +685,11 @@ index bb7ea0d..6675bb5 100644
 +        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x00, 0x04, 0x05, 0x04, 0x01]);
 +        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x00, 0x04, 0x05, 0x03, 0x01]);
 +
-+        // 3. Right Controller: Enable IMU & 16-bit HQ report stream (HHD protocol: EXACT 7 BYTES)
++        // 3. Right Controller: Enable IMU & 16-bit HQ report stream (EXACT 7 BYTES)
 +        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x06, 0x6A, 0x02, 0x04, 0x01, 0x01]);
 +        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x06, 0x6A, 0x07, 0x04, 0x02, 0x01]);
 +
-+        // 4. Left Controller: Enable IMU & 16-bit HQ report stream (HHD protocol: EXACT 7 BYTES)
++        // 4. Left Controller: Enable IMU & 16-bit HQ report stream (EXACT 7 BYTES)
 +        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x06, 0x6A, 0x02, 0x03, 0x01, 0x01]);
 +        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x06, 0x6A, 0x07, 0x03, 0x02, 0x01]);
 +    }
@@ -736,18 +736,18 @@ index bb7ea0d..6675bb5 100644
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x00, 0x04, 0x05, 0x04, 0x01]);
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x00, 0x04, 0x05, 0x03, 0x01]);
 +
-+        // 3. Right Controller: Enable IMU & 16-bit HQ report stream (HHD protocol)
++        // 3. Right Controller: Enable IMU & 16-bit HQ report stream (raw MCU commands)
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x6A, 0x02, 0x04, 0x01, 0x01]);
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x6A, 0x07, 0x04, 0x02, 0x01]);
 +
-+        // 4. Left Controller: Enable IMU & 16-bit HQ report stream (HHD protocol)
++        // 4. Left Controller: Enable IMU & 16-bit HQ report stream (raw MCU commands)
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x6A, 0x02, 0x03, 0x01, 0x01]);
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x6A, 0x07, 0x03, 0x02, 0x01]);
 +
 +        // 5. Disable Legion button swap (keep standard layout)
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x69, 0x04, 0x01, 0x01, 0x01]);
 +
-+        log::info!("Legion Go: sent Lenovo and HHD IMU activation packets (Left & Right)");
++        log::info!("Legion Go: sent Lenovo IMU activation packets (Left & Right)");
 +
 +        let now = Instant::now();
          Ok(Self {
@@ -960,7 +960,7 @@ index bb7ea0d..6675bb5 100644
 +                    yaw: state.left_accel_z,
 +                })))
 +            }
-+            // HHD hardware glitch filter: controller firmware has a bug where it randomly emits
++            // Controller hardware glitch filter: controller firmware has a bug where it randomly emits
 +            // 254..=256 (or -254..=-256) on gyro axes as corrupt glitch packets.
 +            let is_gyro_glitch = |v: i16| -> bool {
 +                let a = v.abs();
@@ -1191,7 +1191,7 @@ index bb7ea0d..6675bb5 100644
          events
      }
 diff --git a/src/drivers/lego/go2_driver.rs b/src/drivers/lego/go2_driver.rs
-index 7fa1b91..bc3fbdd 100644
+index 7fa1b91..e86ddc3 100644
 --- a/src/drivers/lego/go2_driver.rs
 +++ b/src/drivers/lego/go2_driver.rs
 @@ -1,10 +1,10 @@
@@ -1252,11 +1252,11 @@ index 7fa1b91..bc3fbdd 100644
  
  impl Driver {
 +    /// Send an output report to the Legion Go controller interface.
-+    /// Commands 0x6a and 0x69 (HHD protocol) MUST be sent as exact unpadded bytes (7 bytes).
++    /// Commands 0x6a and 0x69 (raw MCU protocol) MUST be sent as exact unpadded bytes (7 bytes).
 +    /// Initial Lenovo feature commands (0x05 0x00 0x04 ...) are padded to 64 bytes.
 +    pub fn send_hid_cmd(dev: &HidDevice, cmd: &[u8]) {
-+        let is_hhd_cmd = cmd.len() >= 3 && (cmd[2] == 0x6A || cmd[2] == 0x69);
-+        if is_hhd_cmd {
++        let is_unpadded_cmd = cmd.len() >= 3 && (cmd[2] == 0x6A || cmd[2] == 0x69);
++        if is_unpadded_cmd {
 +            match dev.write(cmd) {
 +                Ok(n) => log::info!("Legion Go: sent unpadded HID cmd {:02x?} ({} bytes)", cmd, n),
 +                Err(e) => log::warn!("Legion Go: error sending unpadded HID cmd {:02x?}: {}", cmd, e),
@@ -1275,8 +1275,8 @@ index 7fa1b91..bc3fbdd 100644
 +
 +    /// Send non-blocking command: 0x6a commands as exact unpadded 7 bytes, Lenovo reports as 64 bytes padded
 +    fn send_heartbeat_cmd(dev: &HidDevice, cmd: &[u8]) {
-+        let is_hhd_cmd = cmd.len() >= 3 && (cmd[2] == 0x6A || cmd[2] == 0x69);
-+        if is_hhd_cmd {
++        let is_unpadded_cmd = cmd.len() >= 3 && (cmd[2] == 0x6A || cmd[2] == 0x69);
++        if is_unpadded_cmd {
 +            let _ = dev.write(cmd);
 +        } else {
 +            let mut buf = [0u8; 64];
@@ -1296,11 +1296,11 @@ index 7fa1b91..bc3fbdd 100644
 +        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x00, 0x04, 0x05, 0x04, 0x01]);
 +        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x00, 0x04, 0x05, 0x03, 0x01]);
 +
-+        // 3. Right Controller: Enable IMU & 16-bit HQ report stream (HHD protocol: EXACT 7 BYTES)
++        // 3. Right Controller: Enable IMU & 16-bit HQ report stream (EXACT 7 BYTES)
 +        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x06, 0x6A, 0x02, 0x04, 0x01, 0x01]);
 +        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x06, 0x6A, 0x07, 0x04, 0x02, 0x01]);
 +
-+        // 4. Left Controller: Enable IMU & 16-bit HQ report stream (HHD protocol: EXACT 7 BYTES)
++        // 4. Left Controller: Enable IMU & 16-bit HQ report stream (EXACT 7 BYTES)
 +        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x06, 0x6A, 0x02, 0x03, 0x01, 0x01]);
 +        Self::send_heartbeat_cmd(&self.hid_device, &[0x05, 0x06, 0x6A, 0x07, 0x03, 0x02, 0x01]);
 +    }
@@ -1347,18 +1347,18 @@ index 7fa1b91..bc3fbdd 100644
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x00, 0x04, 0x05, 0x04, 0x01]);
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x00, 0x04, 0x05, 0x03, 0x01]);
 +
-+        // 3. Right Controller: Enable IMU & 16-bit HQ report stream (HHD protocol)
++        // 3. Right Controller: Enable IMU & 16-bit HQ report stream (raw MCU commands)
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x6A, 0x02, 0x04, 0x01, 0x01]);
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x6A, 0x07, 0x04, 0x02, 0x01]);
 +
-+        // 4. Left Controller: Enable IMU & 16-bit HQ report stream (HHD protocol)
++        // 4. Left Controller: Enable IMU & 16-bit HQ report stream (raw MCU commands)
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x6A, 0x02, 0x03, 0x01, 0x01]);
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x6A, 0x07, 0x03, 0x02, 0x01]);
 +
 +        // 5. Disable Legion button swap (keep standard layout)
 +        Self::send_hid_cmd(&hid_device, &[0x05, 0x06, 0x69, 0x04, 0x01, 0x01, 0x01]);
 +
-+        log::info!("Legion Go: sent Lenovo and HHD IMU activation packets (Left & Right)");
++        log::info!("Legion Go: sent Lenovo IMU activation packets (Left & Right)");
 +
 +        let now = Instant::now();
          Ok(Self {
@@ -1557,7 +1557,7 @@ index 7fa1b91..bc3fbdd 100644
 -                    roll: -state.right_accel_y,
 -                    yaw: state.right_accel_z,
 -                })))
-+            // HHD hardware glitch filter: controller firmware has a bug where it randomly emits
++            // Controller hardware glitch filter: controller firmware has a bug where it randomly emits
 +            // 254..=256 (or -254..=-256) on gyro axes as corrupt glitch packets.
 +            let is_gyro_glitch = |v: i16| -> bool {
 +                let a = v.abs();
