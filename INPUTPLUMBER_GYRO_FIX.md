@@ -128,6 +128,8 @@ In InputPlumber's virtual Steam Deck emulation layer (`steam_deck_uhid.rs`), an 
   ```bash
   python3 ~/test-gyro.py
   ```
+* **`~/set-controller-gyro-speed.sh <multiplier>`:**  
+  Adjusts the hardware gyro speed multiplier live without restarting (default: `0.70`). Setting to `0.17` allows using standard Steam Sensitivity `2.5`. Persisted in `/etc/inputplumber/controller_gyro_speed`.
 * **`~/set-gyro-source.sh`:**  
   Switches active motion source live between `controller` and `tablet`.
 * **`~/set-ds5-gyro-speed.sh`:**  
@@ -191,12 +193,32 @@ To eliminate clipping during rapid turns, FSR is set to **`±2000 dps`** (`°/s`
      const GYRO_SCALE_RAD: f32 = GYRO_SCALE_DPS * (std::f32::consts::PI / 180.0);
      ```
 
-3. **Anti-Drift & Zero-Rate Preservation:**
-   * Static zero-rate offsets are subtracted on the signed `i16` level before float conversion using `saturating_sub`:
+3. **Anti-Drift & In-Flight Zero-Rate Auto-Bias Calibration:**
+   * Static zero-rate offsets are subtracted on the signed `i16` level before float conversion:
      ```rust
      let calibrated_raw = raw_val.saturating_sub(offset);
      let final_value = calibrated_raw as f32 * GYRO_SCALE_RAD;
      ```
+   * **In-Flight Stationary Detection:** When the controller is kept stationary for $\ge 0.6$ seconds ($< 6$ LSB delta across 200 samples at ~350 Hz), the driver automatically re-calibrates zero-rate DC biases in the background. This completely prevents crosshair drift and ensures 100% directional symmetry without requiring manual calibration.
+
+4. **Continuous Soft Deadzone (18.0 LSB):**
+   * Eliminates the hard jump cliff (previously values $< 24$ dropped to 0, while $\ge 24$ jumped instantly to 24+).
+   * Crosshair movements start continuously and smoothly from 1 LSB:
+     ```rust
+     const SOFT_DEADZONE: f32 = 18.0;
+     let sign = val.signum();
+     let abs = val.abs();
+     if abs <= SOFT_DEADZONE {
+         0.0
+     } else {
+         sign * (abs - SOFT_DEADZONE)
+     }
+     ```
+
+5. **Adaptive EMA Low-Pass Filter (Anti-Jitter):**
+   * Raw MEMS noise and micro hand tremors are smoothed with an adaptive smoothing factor:
+     - $\alpha = 0.35$ for micro-aiming: Eliminates sensor jitter and pixel hopping during fine adjustments.
+     - Dynamically ramps up to $\alpha = 0.95$ during fast flicks: Zero input latency for rapid turns.
 
 ---
 
