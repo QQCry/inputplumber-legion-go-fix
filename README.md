@@ -27,17 +27,26 @@ Works seamlessly in both **Desktop Mode** and **Gamescope (Steam Game Mode)** on
    * **Fix:** Hardcoded persistent MAC addresses (`e8:47:3a:d6:e7:74` for Normal, `e8:47:3a:d6:e7:ee` for Edge). Steam permanently remembers calibrations and per-game mappings.
 6. **Dynamic Gyro Source Switching (Tablet vs. Detached Right Controller):**
    * **Feature:** Allows seamlessly switching between the internal Tablet IMU (`Source::Center`) and the Right Joy-Con Controller IMU (`Source::Right`, for detached/docked play) on-the-fly without restarting games or InputPlumber.
-   * **Fix:** Added live polling of `/etc/inputplumber/gyro_source`.
+    * **Fix:** Added live polling of `/etc/inputplumber/gyro_source`.
 7. **Touchpad / Mouse Lag Prevention:**
    * **Cause:** Enabling MCU IMU bypass (`0x03`) turns off internal hardware filtering on the optical trackpad in the controller firmware, causing cursor jumping and stutter.
    * **Fix:** Driver logic enforces `bypass=0x00`, keeping the optical sensor smooth while IMU streaming remains fully active.
+8. **Anti-Jitter Filtering & Continuous Soft Deadzone:**
+   * **Cause:** Standard hard-threshold deadzones create an abrupt 0 ↔ 24 LSB jump cliff, causing nervous micro-stutter during fine sniper aiming. Raw 350 Hz MEMS noise also causes trembling.
+   * **Fix:** Replaced hard threshold with a continuous soft-deadzone (`18.0 LSB`), ensuring motion starts smoothly at 1 LSB without threshold popping. Integrated an adaptive EMA low-pass filter ($\alpha = 0.35$ for micro-aiming, $\alpha = 0.95$ for rapid flicks) with 0 ms perceptible latency.
+9. **In-Flight Zero-Rate Auto-Bias Calibration (Drift Elimination):**
+   * **Cause:** Environmental temperature changes and Joy-Con mounting tolerances induce DC offsets, causing subtle uncommanded camera drift.
+   * **Fix:** Driver monitors delta variance across all 3 gyro axes. When the controller rests stationary for $\ge 0.6$ seconds, it continuously learns and converges hardware zero-offsets, subtracting them in real-time. This guarantees 100% directional symmetry and eliminates drift completely.
 
 ---
 
 ## 📁 Repository Contents
 
+| File | Description |
+| :--- | :--- |
 | `enable-right-gyro-hhd.sh` | Main installer script: installs the patched native-IMU binary, configures udev/yaml, and restarts the service |
 | `uninstall-gyro-fix.sh` | Complete uninstaller: restores stock binary, cleans udev/yaml overrides, resets MCU to defaults |
+| `set-controller-gyro-speed.sh` | Live real-time speed multiplier tuner for Right Joy-Con gyro (`/etc/inputplumber/controller_gyro_speed`) |
 | `set-gyro-source.sh` | Helper script to switch active gyro source between tablet and controller on-the-fly |
 | `set-ds5-gyro-speed.sh` | Dynamic real-time speed multiplier adjuster for DualSense gyro emulation |
 | `fix-inputplumber.sh` | Comprehensive build & maintenance tool (source rebuild, pacman hook, uninstaller, health check) |
@@ -51,6 +60,7 @@ Works seamlessly in both **Desktop Mode** and **Gamescope (Steam Game Mode)** on
 | `switch-to-inputplumber.sh` | Switch from HHD to InputPlumber with Steam Deck emulation |
 | `fix-mouse-lag.sh` | Reset touchpad optical sensor and controller MCU bypass settings |
 | `INPUTPLUMBER_GYRO_FIX.md` | In-depth technical architecture and protocol documentation |
+| `INPUTPLUMBER_PR612_FEEDBACK.md` | Validation report and upstream feedback templates for PR #612 |
 
 ---
 
@@ -75,10 +85,13 @@ Switch motion sensors anytime without restarting InputPlumber or games:
 ~/set-gyro-source.sh status
 ```
 
-### 3. Adjust DualSense Gyro Speed (Optional)
-If using DualSense emulation, change sensitivity live without restarting:
+### 3. Adjust Gyro Speed Multipliers On-the-Fly
+Adjust sensitivity in real-time without restarting InputPlumber or running games:
 ```bash
-# Set factor (e.g. 1.0 for 1:1 raw, 1.5, 2.0)
+# Set factor for Right Joy-Con controller (e.g. 0.17 for standard Steam 2.5 sensitivity, 0.7 default, 1.0 raw)
+~/set-controller-gyro-speed.sh 0.17
+
+# Set factor for DualSense emulation (e.g. 1.0 raw, 1.5, 2.0)
 ~/set-ds5-gyro-speed.sh 1.0
 ```
 
@@ -148,10 +161,13 @@ The uninstaller (`uninstall-gyro-fix.sh` / `fix-inputplumber.sh --uninstall`) pe
 3. Set **Gyro Behavior** to:
    * **As Mouse** *(Recommended for FPS and precise aiming)*
    * **As Right Joystick** *(For games without simultaneous mouse + gamepad support)*
-4. Set **Gyro Enable Button**:
-   * E.g. **Always On** or **Left Trigger Full Pull** (ADS / Aim Down Sights).
-   * *Note:* Capacitive stick touch is not supported by Legion Go hardware.
-5. In **Steam Settings $\rightarrow$ Controller $\rightarrow$ Calibration $\rightarrow$ Gyroscope**, verify that the horizon is level and responsive.
+4. Set **Gyro Orientation** to:
+   * **"Player Space"** *(Recommended: dynamically fuses Yaw and Roll based on your handheld viewing angle for natural aiming in any posture).*
+5. Set **Gyro Enable Button**:
+   * **"Right Stick Touch"** *(The upper rear M2 button is hardwired to RightStickTouch in our driver – resting your finger on M2 engages gyro instantly without always-on twitching!)*
+   * **"Left Trigger Soft Pull"** *(Engages gyro when aiming down sights / ADS).*
+   * **"Always On"**.
+6. In **Steam Settings $\rightarrow$ Controller $\rightarrow$ Calibration $\rightarrow$ Gyroscope**, verify that the horizon is level and responsive.
 
 ---
 

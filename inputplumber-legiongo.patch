@@ -104,7 +104,7 @@ index 9e23672..7af1049 100644
  
          Ok(Some(Event::Gyro(gyro_input)))
 diff --git a/src/drivers/lego/go1_driver.rs b/src/drivers/lego/go1_driver.rs
-index bb7ea0d..8586484 100644
+index bb7ea0d..6675bb5 100644
 --- a/src/drivers/lego/go1_driver.rs
 +++ b/src/drivers/lego/go1_driver.rs
 @@ -1,19 +1,21 @@
@@ -133,7 +133,7 @@ index bb7ea0d..8586484 100644
  };
  
  pub struct Driver {
-@@ -23,9 +25,71 @@ pub struct Driver {
+@@ -23,9 +25,87 @@ pub struct Driver {
      filtered_events: HashSet<Capability>,
      /// State for the internal gamepad controller
      state: Option<XInputDataReport>,
@@ -141,6 +141,22 @@ index bb7ea0d..8586484 100644
 +    last_emitted_accel: Option<(i16, i16, i16, u8)>,
 +    /// Last emitted gyroscope reading (for resting deadzone gating)
 +    last_emitted_gyro: (i16, i16, i16),
++    /// Filtered smoothed gyroscope reading for right Joy-Con (f32 for precision)
++    smoothed_gyro_right: (f32, f32, f32),
++    /// Filtered smoothed gyroscope reading for left Joy-Con (f32 for precision)
++    smoothed_gyro_left: (f32, f32, f32),
++    /// Learned zero-rate gyroscope bias offset for right Joy-Con (f32)
++    bias_gyro_right: (f32, f32, f32),
++    /// Consecutive stationary samples counter for right Joy-Con
++    stationary_samples_right: u32,
++    /// Last raw gyro reading for right Joy-Con delta tracking
++    last_raw_gyro_right: (i16, i16, i16),
++    /// Learned zero-rate gyroscope bias offset for left Joy-Con (f32)
++    bias_gyro_left: (f32, f32, f32),
++    /// Consecutive stationary samples counter for left Joy-Con
++    stationary_samples_left: u32,
++    /// Last raw gyro reading for left Joy-Con delta tracking
++    last_raw_gyro_left: (i16, i16, i16),
 +    /// Timestamp of last sent heartbeat / keep-alive
 +    last_heartbeat: Instant,
 +    /// Timestamp of last received active motion packet
@@ -205,7 +221,7 @@ index bb7ea0d..8586484 100644
      pub fn new(udev_device: UdevDevice) -> Result<Self, Box<dyn Error + Send + Sync>> {
          let fmtpath = udev_device.devnode().clone();
          let path = CString::new(fmtpath.clone())?;
-@@ -37,34 +101,120 @@ impl Driver {
+@@ -37,34 +117,128 @@ impl Driver {
              || !GO1_PIDS.contains(&info.product_id())
              || info.interface_number() != GP_IID
          {
@@ -264,6 +280,14 @@ index bb7ea0d..8586484 100644
              state: None,
 +            last_emitted_accel: None,
 +            last_emitted_gyro: (0, 0, 0),
++            smoothed_gyro_right: (0.0, 0.0, 0.0),
++            smoothed_gyro_left: (0.0, 0.0, 0.0),
++            bias_gyro_right: (0.0, 0.0, 0.0),
++            stationary_samples_right: 0,
++            last_raw_gyro_right: (0, 0, 0),
++            bias_gyro_left: (0.0, 0.0, 0.0),
++            stationary_samples_left: 0,
++            last_raw_gyro_left: (0, 0, 0),
 +            last_heartbeat: now,
 +            last_motion_packet: now,
          })
@@ -339,7 +363,7 @@ index bb7ea0d..8586484 100644
          }
  
          let report_id = buf[0];
-@@ -73,29 +223,27 @@ impl Driver {
+@@ -73,29 +247,27 @@ impl Driver {
          // Configuration event responses happen on the same endpoint. If this data packet isn't
          // specifically xinput data it can crash the driver, so block it.
          if command_id != XINPUT_COMMAND_ID {
@@ -383,7 +407,7 @@ index bb7ea0d..8586484 100644
          };
  
          Ok(events)
-@@ -109,10 +257,22 @@ impl Driver {
+@@ -109,10 +281,22 @@ impl Driver {
      ) -> Result<Vec<Event>, Box<dyn Error + Send + Sync>> {
          let input_report = XInputDataReport::unpack(&buf)?;
  
@@ -410,7 +434,7 @@ index bb7ea0d..8586484 100644
  
          // Update the state
          let old_state = self.update_xinput_state(input_report);
-@@ -265,6 +425,11 @@ impl Driver {
+@@ -265,6 +449,11 @@ impl Driver {
                      },
                  )));
              }
@@ -422,7 +446,7 @@ index bb7ea0d..8586484 100644
              if state.m2 != old_state.m2 {
                  events.push(Event::GamepadButton(GamepadButtonEvent::M2(BinaryInput {
                      pressed: state.m2,
-@@ -297,6 +462,20 @@ impl Driver {
+@@ -297,6 +486,20 @@ impl Driver {
                      },
                  )));
              }
@@ -443,7 +467,7 @@ index bb7ea0d..8586484 100644
              if state.thumb_l != old_state.thumb_l {
                  events.push(Event::GamepadButton(GamepadButtonEvent::ThumbL(
                      BinaryInput {
-@@ -361,6 +540,137 @@ impl Driver {
+@@ -361,6 +564,246 @@ impl Driver {
                  log::trace!("Left controller connected state: {:?}", state.l_con_state);
                  log::trace!("Right controller connected state: {:?}", state.r_con_state);
              }
@@ -527,27 +551,136 @@ index bb7ea0d..8586484 100644
 +                && !is_gyro_glitch(state.left_gyro_x)
 +                && !is_gyro_glitch(state.left_gyro_y)
 +                && !is_gyro_glitch(state.left_gyro_z)
-+                && (state.left_gyro_x != old_state.left_gyro_x
-+                    || state.left_gyro_y != old_state.left_gyro_y
-+                    || state.left_gyro_z != old_state.left_gyro_z)
 +            {
-+                events.push(Event::Axis(AxisEvent::LeftGyro(ImuAxisInput {
-+                    pitch: -state.left_gyro_x,
-+                    roll: -state.left_gyro_y,
-+                    yaw: -state.left_gyro_z,
-+                })))
++                // In-flight stationary detection & zero-rate auto-bias calibration (Left Joy-Con):
++                let delta_gx = (state.left_gyro_x - self.last_raw_gyro_left.0).abs();
++                let delta_gy = (state.left_gyro_y - self.last_raw_gyro_left.1).abs();
++                let delta_gz = (state.left_gyro_z - self.last_raw_gyro_left.2).abs();
++                self.last_raw_gyro_left = (state.left_gyro_x, state.left_gyro_y, state.left_gyro_z);
++
++                const RESTING_MAX_DELTA: i16 = 6;
++                const RESTING_MAX_BIAS: f32 = 80.0;
++                let is_stationary_sample = delta_gx <= RESTING_MAX_DELTA
++                    && delta_gy <= RESTING_MAX_DELTA
++                    && delta_gz <= RESTING_MAX_DELTA
++                    && (state.left_gyro_x as f32).abs() < RESTING_MAX_BIAS
++                    && (state.left_gyro_y as f32).abs() < RESTING_MAX_BIAS
++                    && (state.left_gyro_z as f32).abs() < RESTING_MAX_BIAS;
++
++                if is_stationary_sample {
++                    self.stationary_samples_left = self.stationary_samples_left.saturating_add(1);
++                    if self.stationary_samples_left >= 200 {
++                        const BIAS_LEARN_RATE: f32 = 0.008;
++                        self.bias_gyro_left.0 += BIAS_LEARN_RATE * (state.left_gyro_x as f32 - self.bias_gyro_left.0);
++                        self.bias_gyro_left.1 += BIAS_LEARN_RATE * (state.left_gyro_y as f32 - self.bias_gyro_left.1);
++                        self.bias_gyro_left.2 += BIAS_LEARN_RATE * (state.left_gyro_z as f32 - self.bias_gyro_left.2);
++                    }
++                } else {
++                    self.stationary_samples_left = 0;
++                }
++
++                let unbiased_gx = state.left_gyro_x as f32 - self.bias_gyro_left.0;
++                let unbiased_gy = state.left_gyro_y as f32 - self.bias_gyro_left.1;
++                let unbiased_gz = state.left_gyro_z as f32 - self.bias_gyro_left.2;
++
++                let update_axis = |raw_f: f32, prev_smooth: f32| -> (f32, i16) {
++                    let delta = (raw_f - prev_smooth).abs();
++                    let alpha = if delta < 20.0 {
++                        0.35
++                    } else if delta < 80.0 {
++                        0.35 + (delta - 20.0) / 60.0 * 0.40
++                    } else {
++                        0.95
++                    };
++                    let smoothed = prev_smooth + alpha * (raw_f - prev_smooth);
++                    const DEADZONE: f32 = 18.0;
++                    let deadzoned = if smoothed > DEADZONE {
++                        smoothed - DEADZONE
++                    } else if smoothed < -DEADZONE {
++                        smoothed + DEADZONE
++                    } else {
++                        0.0
++                    };
++                    (smoothed, deadzoned.round() as i16)
++                };
++
++                let (sm_x, gx) = update_axis(unbiased_gx, self.smoothed_gyro_left.0);
++                let (sm_y, gy) = update_axis(unbiased_gy, self.smoothed_gyro_left.1);
++                let (sm_z, gz) = update_axis(unbiased_gz, self.smoothed_gyro_left.2);
++                self.smoothed_gyro_left = (sm_x, sm_y, sm_z);
++
++                if gx != 0 || gy != 0 || gz != 0 {
++                    events.push(Event::Axis(AxisEvent::LeftGyro(ImuAxisInput {
++                        pitch: -gx,
++                        roll: -gy,
++                        yaw: -gz,
++                    })));
++                }
 +            }
 +            if !self.filtered_events.contains(&Capability::Gyroscope(Source::Right))
 +                && !is_gyro_glitch(state.right_gyro_x)
 +                && !is_gyro_glitch(state.right_gyro_y)
 +                && !is_gyro_glitch(state.right_gyro_z)
 +            {
-+                // Gyro: filter MEMS sensor noise (< 24 LSB ~ 1.4 deg/s).
-+                // Emit when motion is detected, and emit (0, 0, 0) once when transitioning to rest.
-+                const GYRO_NOISE_DEADZONE: i16 = 24;
-+                let gx = if state.right_gyro_x.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_x };
-+                let gy = if state.right_gyro_y.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_y };
-+                let gz = if state.right_gyro_z.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_z };
++                // In-flight stationary detection & zero-rate auto-bias calibration (Right Joy-Con):
++                let delta_gx = (state.right_gyro_x - self.last_raw_gyro_right.0).abs();
++                let delta_gy = (state.right_gyro_y - self.last_raw_gyro_right.1).abs();
++                let delta_gz = (state.right_gyro_z - self.last_raw_gyro_right.2).abs();
++                self.last_raw_gyro_right = (state.right_gyro_x, state.right_gyro_y, state.right_gyro_z);
++
++                const RESTING_MAX_DELTA: i16 = 6;
++                const RESTING_MAX_BIAS: f32 = 80.0;
++                let is_stationary_sample = delta_gx <= RESTING_MAX_DELTA
++                    && delta_gy <= RESTING_MAX_DELTA
++                    && delta_gz <= RESTING_MAX_DELTA
++                    && (state.right_gyro_x as f32).abs() < RESTING_MAX_BIAS
++                    && (state.right_gyro_y as f32).abs() < RESTING_MAX_BIAS
++                    && (state.right_gyro_z as f32).abs() < RESTING_MAX_BIAS;
++
++                if is_stationary_sample {
++                    self.stationary_samples_right = self.stationary_samples_right.saturating_add(1);
++                    // After being stationary for > 200 samples (~0.6s at 350 Hz), converge zero-point offset:
++                    if self.stationary_samples_right >= 200 {
++                        const BIAS_LEARN_RATE: f32 = 0.008;
++                        self.bias_gyro_right.0 += BIAS_LEARN_RATE * (state.right_gyro_x as f32 - self.bias_gyro_right.0);
++                        self.bias_gyro_right.1 += BIAS_LEARN_RATE * (state.right_gyro_y as f32 - self.bias_gyro_right.1);
++                        self.bias_gyro_right.2 += BIAS_LEARN_RATE * (state.right_gyro_z as f32 - self.bias_gyro_right.2);
++                    }
++                } else {
++                    self.stationary_samples_right = 0;
++                }
++
++                // Subtract learned bias to obtain true zero-point reference:
++                let unbiased_gx = state.right_gyro_x as f32 - self.bias_gyro_right.0;
++                let unbiased_gy = state.right_gyro_y as f32 - self.bias_gyro_right.1;
++                let unbiased_gz = state.right_gyro_z as f32 - self.bias_gyro_right.2;
++
++                // Adaptive EMA Low-Pass Filter & Continuous Soft Deadzone:
++                let update_axis = |raw_f: f32, prev_smooth: f32| -> (f32, i16) {
++                    let delta = (raw_f - prev_smooth).abs();
++                    let alpha = if delta < 20.0 {
++                        0.35
++                    } else if delta < 80.0 {
++                        0.35 + (delta - 20.0) / 60.0 * 0.40
++                    } else {
++                        0.95
++                    };
++                    let smoothed = prev_smooth + alpha * (raw_f - prev_smooth);
++                    const DEADZONE: f32 = 18.0;
++                    let deadzoned = if smoothed > DEADZONE {
++                        smoothed - DEADZONE
++                    } else if smoothed < -DEADZONE {
++                        smoothed + DEADZONE
++                    } else {
++                        0.0
++                    };
++                    (smoothed, deadzoned.round() as i16)
++                };
++
++                let (sm_x, gx) = update_axis(unbiased_gx, self.smoothed_gyro_right.0);
++                let (sm_y, gy) = update_axis(unbiased_gy, self.smoothed_gyro_right.1);
++                let (sm_z, gz) = update_axis(unbiased_gz, self.smoothed_gyro_right.2);
++                self.smoothed_gyro_right = (sm_x, sm_y, sm_z);
 +
 +                let is_moving = gx != 0 || gy != 0 || gz != 0;
 +                let was_moving = self.last_emitted_gyro.0 != 0 || self.last_emitted_gyro.1 != 0 || self.last_emitted_gyro.2 != 0;
@@ -582,7 +715,7 @@ index bb7ea0d..8586484 100644
          events
      }
 diff --git a/src/drivers/lego/go2_driver.rs b/src/drivers/lego/go2_driver.rs
-index 7fa1b91..fa8ba2c 100644
+index 7fa1b91..bc3fbdd 100644
 --- a/src/drivers/lego/go2_driver.rs
 +++ b/src/drivers/lego/go2_driver.rs
 @@ -1,10 +1,10 @@
@@ -597,7 +730,7 @@ index 7fa1b91..fa8ba2c 100644
  use crate::input::capability::{Capability, Source};
  use crate::udev::device::UdevDevice;
  
-@@ -14,22 +14,82 @@ use super::{
+@@ -14,22 +14,98 @@ use super::{
          MouseWheelInput, TriggerEvent, TriggerInput,
      },
      hid_report::{GamepadMode, XInputDataReport},
@@ -619,6 +752,22 @@ index 7fa1b91..fa8ba2c 100644
 +    last_emitted_accel: Option<(i16, i16, i16, u8)>,
 +    /// Last emitted gyroscope reading (for resting deadzone gating)
 +    last_emitted_gyro: (i16, i16, i16),
++    /// Filtered smoothed gyroscope reading for right Joy-Con (f32 for precision)
++    smoothed_gyro_right: (f32, f32, f32),
++    /// Filtered smoothed gyroscope reading for left Joy-Con (f32 for precision)
++    smoothed_gyro_left: (f32, f32, f32),
++    /// Learned zero-rate gyroscope bias offset for right Joy-Con (f32)
++    bias_gyro_right: (f32, f32, f32),
++    /// Consecutive stationary samples counter for right Joy-Con
++    stationary_samples_right: u32,
++    /// Last raw gyro reading for right Joy-Con delta tracking
++    last_raw_gyro_right: (i16, i16, i16),
++    /// Learned zero-rate gyroscope bias offset for left Joy-Con (f32)
++    bias_gyro_left: (f32, f32, f32),
++    /// Consecutive stationary samples counter for left Joy-Con
++    stationary_samples_left: u32,
++    /// Last raw gyro reading for left Joy-Con delta tracking
++    last_raw_gyro_left: (i16, i16, i16),
 +    /// Timestamp of last sent heartbeat / keep-alive
 +    last_heartbeat: Instant,
 +    /// Timestamp of last received active motion packet
@@ -683,7 +832,7 @@ index 7fa1b91..fa8ba2c 100644
      pub fn new(udev_device: UdevDevice) -> Result<Self, Box<dyn Error + Send + Sync>> {
          let fmtpath = udev_device.devnode().clone();
          let path = CString::new(fmtpath.clone())?;
-@@ -41,21 +101,65 @@ impl Driver {
+@@ -41,21 +117,73 @@ impl Driver {
              || !GO2_PIDS.contains(&info.product_id())
              || info.interface_number() != GP_IID
          {
@@ -743,6 +892,14 @@ index 7fa1b91..fa8ba2c 100644
              state: None,
 +            last_emitted_accel: None,
 +            last_emitted_gyro: (0, 0, 0),
++            smoothed_gyro_right: (0.0, 0.0, 0.0),
++            smoothed_gyro_left: (0.0, 0.0, 0.0),
++            bias_gyro_right: (0.0, 0.0, 0.0),
++            stationary_samples_right: 0,
++            last_raw_gyro_right: (0, 0, 0),
++            bias_gyro_left: (0.0, 0.0, 0.0),
++            stationary_samples_left: 0,
++            last_raw_gyro_left: (0, 0, 0),
 +            last_heartbeat: now,
 +            last_motion_packet: now,
          })
@@ -755,7 +912,7 @@ index 7fa1b91..fa8ba2c 100644
      pub fn update_filtered_events(&mut self, events: HashSet<Capability>) {
          self.filtered_events = events;
      }
-@@ -63,37 +167,54 @@ impl Driver {
+@@ -63,37 +191,54 @@ impl Driver {
      pub fn get_default_event_filter(
          &self,
      ) -> Result<HashSet<Capability>, Box<dyn Error + Send + Sync>> {
@@ -837,7 +994,7 @@ index 7fa1b91..fa8ba2c 100644
          }
  
          let report_id = buf[0];
-@@ -102,29 +223,27 @@ impl Driver {
+@@ -102,29 +247,27 @@ impl Driver {
          // Configuration event responses happen on the same endpoint. If this data packet isn't
          // specifically xinput data it can crash the driver, so block it.
          if command_id != XINPUT_COMMAND_ID {
@@ -881,7 +1038,7 @@ index 7fa1b91..fa8ba2c 100644
          };
  
          Ok(events)
-@@ -138,10 +257,22 @@ impl Driver {
+@@ -138,10 +281,22 @@ impl Driver {
      ) -> Result<Vec<Event>, Box<dyn Error + Send + Sync>> {
          let input_report = XInputDataReport::unpack(&buf)?;
  
@@ -908,7 +1065,7 @@ index 7fa1b91..fa8ba2c 100644
  
          // Update the state
          let old_state = self.update_xinput_state(input_report);
-@@ -422,18 +553,50 @@ impl Driver {
+@@ -422,18 +577,50 @@ impl Driver {
                      yaw: state.left_accel_z,
                  })))
              }
@@ -971,24 +1128,86 @@ index 7fa1b91..fa8ba2c 100644
              }
              if !self
                  .filtered_events
-@@ -454,28 +617,42 @@ impl Driver {
+@@ -454,28 +641,151 @@ impl Driver {
              if !self
                  .filtered_events
                  .contains(&Capability::Gyroscope(Source::Left))
+-                && (state.left_gyro_x != old_state.left_gyro_x
+-                    || state.left_gyro_y != old_state.left_gyro_y
+-                    || state.left_gyro_z != old_state.left_gyro_z)
 +                && !is_gyro_glitch(state.left_gyro_x)
 +                && !is_gyro_glitch(state.left_gyro_y)
 +                && !is_gyro_glitch(state.left_gyro_z)
-                 && (state.left_gyro_x != old_state.left_gyro_x
-                     || state.left_gyro_y != old_state.left_gyro_y
-                     || state.left_gyro_z != old_state.left_gyro_z)
              {
-                 events.push(Event::Axis(AxisEvent::LeftGyro(ImuAxisInput {
-                     pitch: -state.left_gyro_x,
+-                events.push(Event::Axis(AxisEvent::LeftGyro(ImuAxisInput {
+-                    pitch: -state.left_gyro_x,
 -                    roll: state.left_gyro_y,
 -                    yaw: state.left_gyro_z,
-+                    roll: -state.left_gyro_y,
-+                    yaw: -state.left_gyro_z,
-                 })))
+-                })))
++                // In-flight stationary detection & zero-rate auto-bias calibration (Left Joy-Con):
++                let delta_gx = (state.left_gyro_x - self.last_raw_gyro_left.0).abs();
++                let delta_gy = (state.left_gyro_y - self.last_raw_gyro_left.1).abs();
++                let delta_gz = (state.left_gyro_z - self.last_raw_gyro_left.2).abs();
++                self.last_raw_gyro_left = (state.left_gyro_x, state.left_gyro_y, state.left_gyro_z);
++
++                const RESTING_MAX_DELTA: i16 = 6;
++                const RESTING_MAX_BIAS: f32 = 80.0;
++                let is_stationary_sample = delta_gx <= RESTING_MAX_DELTA
++                    && delta_gy <= RESTING_MAX_DELTA
++                    && delta_gz <= RESTING_MAX_DELTA
++                    && (state.left_gyro_x as f32).abs() < RESTING_MAX_BIAS
++                    && (state.left_gyro_y as f32).abs() < RESTING_MAX_BIAS
++                    && (state.left_gyro_z as f32).abs() < RESTING_MAX_BIAS;
++
++                if is_stationary_sample {
++                    self.stationary_samples_left = self.stationary_samples_left.saturating_add(1);
++                    if self.stationary_samples_left >= 200 {
++                        const BIAS_LEARN_RATE: f32 = 0.008;
++                        self.bias_gyro_left.0 += BIAS_LEARN_RATE * (state.left_gyro_x as f32 - self.bias_gyro_left.0);
++                        self.bias_gyro_left.1 += BIAS_LEARN_RATE * (state.left_gyro_y as f32 - self.bias_gyro_left.1);
++                        self.bias_gyro_left.2 += BIAS_LEARN_RATE * (state.left_gyro_z as f32 - self.bias_gyro_left.2);
++                    }
++                } else {
++                    self.stationary_samples_left = 0;
++                }
++
++                let unbiased_gx = state.left_gyro_x as f32 - self.bias_gyro_left.0;
++                let unbiased_gy = state.left_gyro_y as f32 - self.bias_gyro_left.1;
++                let unbiased_gz = state.left_gyro_z as f32 - self.bias_gyro_left.2;
++
++                let update_axis = |raw_f: f32, prev_smooth: f32| -> (f32, i16) {
++                    let delta = (raw_f - prev_smooth).abs();
++                    let alpha = if delta < 20.0 {
++                        0.35
++                    } else if delta < 80.0 {
++                        0.35 + (delta - 20.0) / 60.0 * 0.40
++                    } else {
++                        0.95
++                    };
++                    let smoothed = prev_smooth + alpha * (raw_f - prev_smooth);
++                    const DEADZONE: f32 = 18.0;
++                    let deadzoned = if smoothed > DEADZONE {
++                        smoothed - DEADZONE
++                    } else if smoothed < -DEADZONE {
++                        smoothed + DEADZONE
++                    } else {
++                        0.0
++                    };
++                    (smoothed, deadzoned.round() as i16)
++                };
++
++                let (sm_x, gx) = update_axis(unbiased_gx, self.smoothed_gyro_left.0);
++                let (sm_y, gy) = update_axis(unbiased_gy, self.smoothed_gyro_left.1);
++                let (sm_z, gz) = update_axis(unbiased_gz, self.smoothed_gyro_left.2);
++                self.smoothed_gyro_left = (sm_x, sm_y, sm_z);
++
++                if gx != 0 || gy != 0 || gz != 0 {
++                    events.push(Event::Axis(AxisEvent::LeftGyro(ImuAxisInput {
++                        pitch: -gx,
++                        roll: -gy,
++                        yaw: -gz,
++                    })));
++                }
              }
 -            if !self
 -                .filtered_events
@@ -1006,12 +1225,65 @@ index 7fa1b91..fa8ba2c 100644
 -                    roll: state.right_gyro_y,
 -                    yaw: state.right_gyro_z,
 -                })))
-+                // Gyro: filter MEMS sensor noise (< 24 LSB ~ 1.4 deg/s).
-+                // Emit when motion is detected, and emit (0, 0, 0) once when transitioning to rest.
-+                const GYRO_NOISE_DEADZONE: i16 = 24;
-+                let gx = if state.right_gyro_x.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_x };
-+                let gy = if state.right_gyro_y.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_y };
-+                let gz = if state.right_gyro_z.abs() < GYRO_NOISE_DEADZONE { 0 } else { state.right_gyro_z };
++                // In-flight stationary detection & zero-rate auto-bias calibration (Right Joy-Con):
++                let delta_gx = (state.right_gyro_x - self.last_raw_gyro_right.0).abs();
++                let delta_gy = (state.right_gyro_y - self.last_raw_gyro_right.1).abs();
++                let delta_gz = (state.right_gyro_z - self.last_raw_gyro_right.2).abs();
++                self.last_raw_gyro_right = (state.right_gyro_x, state.right_gyro_y, state.right_gyro_z);
++
++                const RESTING_MAX_DELTA: i16 = 6;
++                const RESTING_MAX_BIAS: f32 = 80.0;
++                let is_stationary_sample = delta_gx <= RESTING_MAX_DELTA
++                    && delta_gy <= RESTING_MAX_DELTA
++                    && delta_gz <= RESTING_MAX_DELTA
++                    && (state.right_gyro_x as f32).abs() < RESTING_MAX_BIAS
++                    && (state.right_gyro_y as f32).abs() < RESTING_MAX_BIAS
++                    && (state.right_gyro_z as f32).abs() < RESTING_MAX_BIAS;
++
++                if is_stationary_sample {
++                    self.stationary_samples_right = self.stationary_samples_right.saturating_add(1);
++                    // After being stationary for > 200 samples (~0.6s at 350 Hz), converge zero-point offset:
++                    if self.stationary_samples_right >= 200 {
++                        const BIAS_LEARN_RATE: f32 = 0.008;
++                        self.bias_gyro_right.0 += BIAS_LEARN_RATE * (state.right_gyro_x as f32 - self.bias_gyro_right.0);
++                        self.bias_gyro_right.1 += BIAS_LEARN_RATE * (state.right_gyro_y as f32 - self.bias_gyro_right.1);
++                        self.bias_gyro_right.2 += BIAS_LEARN_RATE * (state.right_gyro_z as f32 - self.bias_gyro_right.2);
++                    }
++                } else {
++                    self.stationary_samples_right = 0;
++                }
++
++                // Subtract learned bias to obtain true zero-point reference:
++                let unbiased_gx = state.right_gyro_x as f32 - self.bias_gyro_right.0;
++                let unbiased_gy = state.right_gyro_y as f32 - self.bias_gyro_right.1;
++                let unbiased_gz = state.right_gyro_z as f32 - self.bias_gyro_right.2;
++
++                // Adaptive EMA Low-Pass Filter & Continuous Soft Deadzone:
++                let update_axis = |raw_f: f32, prev_smooth: f32| -> (f32, i16) {
++                    let delta = (raw_f - prev_smooth).abs();
++                    let alpha = if delta < 20.0 {
++                        0.35
++                    } else if delta < 80.0 {
++                        0.35 + (delta - 20.0) / 60.0 * 0.40
++                    } else {
++                        0.95
++                    };
++                    let smoothed = prev_smooth + alpha * (raw_f - prev_smooth);
++                    const DEADZONE: f32 = 18.0;
++                    let deadzoned = if smoothed > DEADZONE {
++                        smoothed - DEADZONE
++                    } else if smoothed < -DEADZONE {
++                        smoothed + DEADZONE
++                    } else {
++                        0.0
++                    };
++                    (smoothed, deadzoned.round() as i16)
++                };
++
++                let (sm_x, gx) = update_axis(unbiased_gx, self.smoothed_gyro_right.0);
++                let (sm_y, gy) = update_axis(unbiased_gy, self.smoothed_gyro_right.1);
++                let (sm_z, gz) = update_axis(unbiased_gz, self.smoothed_gyro_right.2);
++                self.smoothed_gyro_right = (sm_x, sm_y, sm_z);
 +
 +                let is_moving = gx != 0 || gy != 0 || gz != 0;
 +                let was_moving = self.last_emitted_gyro.0 != 0 || self.last_emitted_gyro.1 != 0 || self.last_emitted_gyro.2 != 0;
@@ -1123,7 +1395,7 @@ index e11cd6b..7572057 100644
                  };
                  let device = LegionGo2Controller::new(device_info.clone())?;
 diff --git a/src/input/source/hidraw/legion_go.rs b/src/input/source/hidraw/legion_go.rs
-index 37f735b..5a620a4 100644
+index 37f735b..26d8260 100644
 --- a/src/input/source/hidraw/legion_go.rs
 +++ b/src/input/source/hidraw/legion_go.rs
 @@ -10,7 +10,7 @@ use crate::{
@@ -1185,7 +1457,31 @@ index 37f735b..5a620a4 100644
  }
  
  impl SourceOutputDevice for LegionGoController {}
-@@ -248,6 +282,22 @@ fn normalize_axis_value(event: AxisEvent) -> InputValue {
+@@ -218,6 +252,23 @@ impl Debug for LegionGoController {
+     }
+ }
+ 
++fn get_controller_gyro_multiplier() -> f64 {
++    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
++    static MULTIPLIER_BITS: std::sync::atomic::AtomicU64 =
++        std::sync::atomic::AtomicU64::new(0x3FE6666666666666); // 0.7f64.to_bits()
++
++    let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++    if count % 200 == 0 {
++        let mult = if let Ok(s) = std::fs::read_to_string("/etc/inputplumber/controller_gyro_speed") {
++            s.trim().parse::<f64>().unwrap_or(0.7)
++        } else {
++            0.7
++        };
++        MULTIPLIER_BITS.store(mult.to_bits(), std::sync::atomic::Ordering::Relaxed);
++    }
++    f64::from_bits(MULTIPLIER_BITS.load(std::sync::atomic::Ordering::Relaxed))
++}
++
+ /// Normalize the value to something between -1.0 and 1.0 based on the
+ /// minimum and maximum axis ranges.
+ fn normalize_axis_value(event: AxisEvent) -> InputValue {
+@@ -248,6 +299,22 @@ fn normalize_axis_value(event: AxisEvent) -> InputValue {
  
              InputValue::Vector2 { x, y }
          }
@@ -1198,17 +1494,17 @@ index 37f735b..5a620a4 100644
 +            z: Some(value.yaw as f64 * 3.542),
 +        },
 +        AxisEvent::LeftGyro(value) | AxisEvent::RightGyro(value) | AxisEvent::MultiGyro(value) => {
-+            // 1:1 standard gyro scaling
++            let mult = get_controller_gyro_multiplier();
 +            InputValue::Vector3 {
-+                x: Some(value.pitch as f64 * 1.0),
-+                y: Some(value.yaw as f64 * 1.0),
-+                z: Some(value.roll as f64 * 1.0),
++                x: Some(value.pitch as f64 * mult),
++                y: Some(value.yaw as f64 * mult),
++                z: Some(value.roll as f64 * mult),
 +            }
 +        }
          _ => InputValue::None,
      }
  }
-@@ -273,6 +323,12 @@ fn normalize_trigger_value(event: event::TriggerEvent) -> InputValue {
+@@ -273,6 +340,12 @@ fn normalize_trigger_value(event: event::TriggerEvent) -> InputValue {
  }
  /// List of all capabilities that the Legion Go driver implements
  pub const CAPABILITIES: &[Capability] = &[
@@ -1222,10 +1518,34 @@ index 37f735b..5a620a4 100644
      Capability::Gamepad(Gamepad::Axis(GamepadAxis::RightStick)),
      Capability::Gamepad(Gamepad::Button(GamepadButton::DPadDown)),
 diff --git a/src/input/source/hidraw/legion_go2.rs b/src/input/source/hidraw/legion_go2.rs
-index 1ad56bd..d46c2bc 100644
+index 1ad56bd..6cfe0c9 100644
 --- a/src/input/source/hidraw/legion_go2.rs
 +++ b/src/input/source/hidraw/legion_go2.rs
-@@ -296,15 +296,17 @@ fn normalize_axis_value(event: AxisEvent) -> InputValue {
+@@ -263,6 +263,23 @@ impl Debug for LegionGo2Controller {
+     }
+ }
+ 
++fn get_controller_gyro_multiplier() -> f64 {
++    static COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
++    static MULTIPLIER_BITS: std::sync::atomic::AtomicU64 =
++        std::sync::atomic::AtomicU64::new(0x3FE6666666666666); // 0.7f64.to_bits()
++
++    let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++    if count % 200 == 0 {
++        let mult = if let Ok(s) = std::fs::read_to_string("/etc/inputplumber/controller_gyro_speed") {
++            s.trim().parse::<f64>().unwrap_or(0.7)
++        } else {
++            0.7
++        };
++        MULTIPLIER_BITS.store(mult.to_bits(), std::sync::atomic::Ordering::Relaxed);
++    }
++    f64::from_bits(MULTIPLIER_BITS.load(std::sync::atomic::Ordering::Relaxed))
++}
++
+ /// Normalize the value to something between -1.0 and 1.0 based on the
+ /// minimum and maximum axis ranges.
+ fn normalize_axis_value(event: AxisEvent) -> InputValue {
+@@ -296,15 +313,17 @@ fn normalize_axis_value(event: AxisEvent) -> InputValue {
          AxisEvent::LeftAccel(value)
          | AxisEvent::RightAccel(value)
          | AxisEvent::MultiAccel(value) => InputValue::Vector3 {
@@ -1238,14 +1558,14 @@ index 1ad56bd..d46c2bc 100644
 +            z: Some(value.yaw as f64 * 3.542),
          },
          AxisEvent::LeftGyro(value) | AxisEvent::RightGyro(value) | AxisEvent::MultiGyro(value) => {
-+            // 1:1 standard gyro scaling
++            let mult = get_controller_gyro_multiplier();
              InputValue::Vector3 {
 -                x: Some(value.pitch as f64),
 -                y: Some(value.roll as f64),
 -                z: Some(value.yaw as f64),
-+                x: Some(value.pitch as f64 * 1.0),
-+                y: Some(value.yaw as f64 * 1.0),
-+                z: Some(value.roll as f64 * 1.0),
++                x: Some(value.pitch as f64 * mult),
++                y: Some(value.yaw as f64 * mult),
++                z: Some(value.roll as f64 * mult),
              }
          }
          _ => InputValue::None,
